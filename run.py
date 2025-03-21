@@ -1,77 +1,85 @@
 import yaml
 import argparse
 import torch
-from torch.utils.data import DataLoader
-from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AutoTokenizer, AutoModelForCausalLM
-from datasets import load_dataset, Dataset
-import matplotlib.pyplot as plt
-from gptopt.utils import compute_cross_entropy_loss, get_default_config, merge_configs, load_config, get_outputfile_from_configfile
-from gptopt.data import load_data
-from gptopt.train import train
-from gptopt.optim.utils import get_scheduler, get_optimizer
-from gptopt.utils import set_seed
-import copy 
 import json
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2Config, GPT2LMHeadModel
+import importlib
+from matsign.svd import matsign as svd_matsign  # Import the SVD-based matsign function
 
-def main(config_file=None):
-    set_seed(42)
-    default_config = get_default_config()      # Default parameters if no config file is provided
-    if config_file:
-        config = load_config(default_config, config_file)
+def apply_function_to_weights(model, func, results, steps = 5):
+    """
+    Apply a numerical linear algebra function to the weights of every linear layer in the model
+    and record the difference with the SVD-based matsign function.
 
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The GPT-2 model.
+    func : callable
+        The numerical linear algebra function to apply.
+    results : dict
+        Dictionary to store the differences for each layer.
+    """
+    for name, param in model.named_parameters():
+        if "weight" in name and param.ndim == 2:  # Apply only to 2D weight matrices
+            print(f"Processing {name}")
+            original_weights = param.data.clone()
+            svd_result = svd_matsign(original_weights)  # Compute SVD-based matsign
+            func_result = func(original_weights, steps =steps)  # Compute matsign using the chosen function
+            relative_difference = (svd_result - func_result).norm().item()  # Compute norm of the difference
+            results[name] = relative_difference/svd_result.norm().item()
+            print(f"Relative Diff for {name}: {relative_difference}")
+
+def main(config_file):
+    # Load configuration
+    with open(config_file, 'r') as file:
+        config = yaml.safe_load(file)
+    # Load the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    train_dataloader, test_dataloader = load_data(config['dataset']['name'], batch_size=config['training_params']['batch_size'])
-    # Load model using "model_name"
     if 'model_name' in config['gpt_model']:
         model = AutoModelForCausalLM.from_pretrained(config['gpt_model']['model_name'], device_map="auto").to(device)
     else:
         gpt_config = config['gpt_model']
         model_config = GPT2Config(
-            n_embd=gpt_config['n_embd'],   # Hidden size used in distilgpt2
-            n_layer=gpt_config['n_layer'],    # Number of layers in distilgpt2
-            n_head=gpt_config['n_head'],    # Number of attention heads in distilgpt2
-            vocab_size=gpt_config['vocab_size'],  # Standard GPT-2 vocabulary size
+            n_embd=gpt_config['n_embd'],
+            n_layer=gpt_config['n_layer'],
+            n_head=gpt_config['n_head'],
+            vocab_size=gpt_config['vocab_size'],
         )
-        model = GPT2LMHeadModel(model_config).to(device)   # Initialize a new model with random weights using this configuration
-    tokenizer = AutoTokenizer.from_pretrained(config['gpt_model']['tokenizer_name'])
-    tokenizer.pad_token = tokenizer.eos_token
+        model = GPT2LMHeadModel(model_config).to(device)
 
-    # Set the training parameters
-    training_params = config['training_params'] 
-    print(f"Training on dataset {config['dataset']['name']}")
-    # Access the optimizer parameters
-    list_optimizer_params = config["optimizer_params"]
-    outputs = []
-    for optimizer_config in list_optimizer_params:
-        for lr in optimizer_config['lr']:
-            print(f"Training with optimizer {optimizer_config['name']} and learning rate {lr}")
-            model_copy = copy.deepcopy(model).to(device)  # The model remains the same
-            total_iterations = training_params['num_epochs'] * len(train_dataloader)
-            optimizer_obj, hyperp = get_optimizer(optimizer_config, lr = lr)
-            optimizer = optimizer_obj(params=model_copy.parameters(), **hyperp)
-            scheduler = get_scheduler(optimizer_config, optimizer, total_iterations = total_iterations)
-            if 'momo' in optimizer_config['name']:
-                output = train(tokenizer, train_dataloader, model_copy, optimizer, training_params, device=device, scheduler=scheduler, pass_loss=True)
-            else:
-                output = train(tokenizer, train_dataloader, model_copy, optimizer, training_params, device=device, scheduler=scheduler)
-            output['name'] = optimizer_config['name'] + '-lr-'+str(lr)
-            outputs.append(output)
+    # Print model details
+    num_layers = len([name for name, _ in model.named_parameters() if "weight" in name and "h." in name])
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of layers: {num_layers}")
+    print(f"Total number of parameters: {total_params}")
 
-    outputfile = get_outputfile_from_configfile(config_file) 
-    with open(outputfile, 'w') as file: json.dump(outputs, file)
-   
+    # Print number of linear layers
+    num_linear_layers = len([name for name, param in model.named_parameters() if "weight" in name and param.ndim == 2])
+    print(f"Number of linear layers: {num_linear_layers}")
+
+    # Dynamically import the specified matsign function
+    matsign_method = config['matsign_method']['name']
+    steps = config['matsign_method']['steps']
+    module_name = f"matsign.{matsign_method}"
+    module = importlib.import_module(module_name)
+    func = getattr(module, "matsign")
+
+    # Record differences
+    results = {}
+    apply_function_to_weights(model, func, results, steps = steps)
+    # Save results to file
+    name = config['name'] +  ".json"
+    name = "matsign/outputs/" + name
+    with open( name, "w") as f: 
+        json.dump(results, f, indent=4)
+    print(f"Results saved to {name}")
+
 if __name__ == "__main__":
-    # Argument parser to optionally provide a config file
-    parser = argparse.ArgumentParser(description='Train GPT-2 with optional config file.')
-    parser.add_argument('--config', type=str, help='Path to config file', default=None)
+    # Argument parser to provide config file
+    parser = argparse.ArgumentParser(description='Test numerical linear algebra functions on GPT-2 weights.')
+    parser.add_argument('--config', type=str, required=True, help='Path to config file')
     
     args = parser.parse_args()
-    if args.config:
-        print(f"Loading configuration from {args.config}")
-    else:
-        print("No config file provided, using default settings.")
     main(args.config)
-    
-
-
