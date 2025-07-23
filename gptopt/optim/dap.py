@@ -3,6 +3,9 @@ from torch import nn
 from torch.optim import Optimizer
 from gptopt.linalg_utils import ns_pinv
 
+import os
+import sys
+
 class DAP(Optimizer):
     def __init__(
         self,
@@ -33,14 +36,9 @@ class DAP(Optimizer):
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
         )
+
         dap_params, dap_params_names = [], []
         adamw_params, adamw_params_names = [], []
-
-        self.dap_params   = dap_params
-        self.dap_params_names = dap_params_names
-
-        self.adamw_params = adamw_params
-        self.adamw_params_names = adamw_params_names
 
         excluded_names = []
         if not include_output:
@@ -49,7 +47,11 @@ class DAP(Optimizer):
         if not include_embed:
             excluded_names.extend(["embeddings", "embed_tokens", "wte", "wpe"])
 
+        self.param_to_name = {} 
+
         for name, p in named_params:
+            self.param_to_name[p] = name
+
             if p.ndim >= 2 and not any(
                 excluded in name for excluded in excluded_names
             ):
@@ -72,6 +74,17 @@ class DAP(Optimizer):
         params = list(dap_params)
         params.extend(adamw_params)
         super().__init__(params, defaults)
+
+        # Sort parameters into those for which we will use DAP, and those for which we will not
+        # Use DAP for every parameter in dap_params which is >= 2D and doesn't look like an embedding or head layer
+        for p in dap_params:
+                assert p.ndim == 2, p.ndim
+                self.state[p]["use_dap"] = True
+                
+        for p in adamw_params:
+                # Do not use DAP for parameters in adamw_params
+                self.state[p]["use_dap"] = False
+
         self.ema_beta = ema_beta
         # Whether to bypass the expensive preconditioner and use a plain SGD update.
         self.sgd_update = sgd_update
@@ -143,14 +156,16 @@ class DAP(Optimizer):
             ############################
             #           DAP           #
             ############################
-
             lr = group["lr"]
             wd = group["wd"]
+
             momentum = group["momentum"]
             damping = group["damping"]
 
+            params = [p for p in group["params"] if self.state[p]["use_dap"]]
+
             # apply weight updates
-            for i, p in enumerate(self.dap_params):
+            for i, p in enumerate(params):
 
                 # sanity check
                 g = p.grad
@@ -161,6 +176,11 @@ class DAP(Optimizer):
 
                 # calc momentum.
                 state = self.state[p]
+                if "step" not in state:
+                    state["step"] = 0
+                state["step"] += 1
+                step = state["step"]
+
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
                 buf = state["momentum_buffer"]
@@ -183,19 +203,37 @@ class DAP(Optimizer):
                     u = g
                 else:
                     C = self.state[p]["C_ema"]
+                    if damping:
+                        C.diagonal().add_(damping * torch.trace(C) / C.shape[0])
+
                     C32 = C.float()
                     g32 = g.float()
 
                     if self.use_ns_pinv:
-                        u32 = g32 @ ns_pinv(C32, steps=self.ns_pinv_steps)
-                    else:
-                        if damping:
-                            C32.diagonal().add_(damping)
+                        C32_pinv = ns_pinv(C32, max_steps=self.ns_pinv_steps)
 
+                        if torch.isnan(C32_pinv).any() or torch.isinf(C32_pinv).any():
+                            # Save C matrix for debugging
+                            debug_dir = "debug_matrices"
+                            os.makedirs(debug_dir, exist_ok=True)
+                            matrix_path = os.path.join(debug_dir, f"C_{self.param_to_name[p]}_step_{step}.pt")
+                            grad_path = os.path.join(debug_dir, f"grad_{self.param_to_name[p]}_step_{step}.pt")
+                            torch.save(C32, matrix_path)
+                            torch.save(g32, grad_path)
+
+                            # Exit if we encounter NaN/inf in pseudo-inverse
+                            print(f"ERROR: NaN/inf detected in pseudo-inverse calculation for parameter {self.param_to_name[p]} at step {step}")
+                            print(f"Matrix saved to debug_matrices/C_{self.param_to_name[p]}_step_{step}.pt")
+                            sys.exit(1)
+
+                        u32 = g32 @ C32_pinv
+                    else:
                         if self.scalar:
                             u32 = g32 / torch.linalg.norm(C32, ord=2)
                         else:
                             # Precondition the gradient using the inverse covariance.
+                            # Try lstsq first, fall back to pinv if it fails
+                            # u32 = torch.linalg.lstsq(C32, g32.T).solution.T
                             u32 = g32 @ torch.linalg.pinv(C32)
                         
                     u = u32.to(p.dtype)
@@ -214,8 +252,9 @@ class DAP(Optimizer):
             beta1, beta2 = group["adamw_betas"]
             eps = group["adamw_eps"]
             weight_decay = group["wd"]
+            params = [p for p in group["params"] if not self.state[p]["use_dap"]]
 
-            for p in self.adamw_params:
+            for p in params:
                 g = p.grad
                 if g is None:
                     continue

@@ -2,9 +2,10 @@ import torch
 
 def rel_err(X: torch.Tensor, Y: torch.Tensor):
     """‖X − Y‖ / (‖Y‖ + ε)"""
-    return (X - Y).norm() / (Y.norm() + 1e-16)
+    err = (X - Y).norm() / (Y.norm() + 1e-16)
+    return err.item()
 
-def ns_pinv(A: torch.Tensor, steps: int = 20, diagnostics: bool = False):
+def ns_pinv(A: torch.Tensor, max_steps: int = 20, diagnostics: bool = False, use_double: bool = False):
     """
     Moore–Penrose pseudo-inverse via Newton–Schulz iteration (2-D only).
 
@@ -29,18 +30,23 @@ def ns_pinv(A: torch.Tensor, steps: int = 20, diagnostics: bool = False):
     transposed = A.shape[0] > A.shape[1]   # make the working copy fat
     M = A.T if transposed else A           # shape: (m≤n, n)
 
+    if use_double:  
+        M = M.double()
+
     scale = M.norm() + 1e-16                # stabilising scale factor
     M = M / scale
     Y = M.T                                # initial guess (n, m)
 
     if diagnostics:
-        M_pinv = torch.linalg.pinv(M)      # reference (scaled) solution
-        errs = [rel_err(Y, M_pinv)]
+        pinv_ref = torch.linalg.pinv(M)      # reference (scaled) solution
+        errs = [rel_err(Y, pinv_ref)]
 
-    for _ in range(steps):                 # Newton–Schulz refinement
-        Y = 2 * Y - Y @ M @ Y
+    for _ in range(max_steps):
+        Y_new = 2 * Y - Y @ M @ Y
         if diagnostics:
-            errs.append(rel_err(Y, M_pinv))
+            err = rel_err(Y_new, pinv_ref)
+            errs.append(err)
+        Y = Y_new
 
     pinv = Y / scale                             # undo scaling
     if transposed:

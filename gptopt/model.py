@@ -54,11 +54,7 @@ def load_model_huggingface(config, device):
 
 
 def load_model(config, device):
-    gptconfig = GPTConfig()
-    gptconfig.n_embd = config['n_embd']
-    gptconfig.n_layer = config['n_layer']
-    gptconfig.n_head = config['n_head']
-    gptconfig.vocab_size = config['vocab_size']
-    model = GPT(gptconfig, device, flash_attention=config['flash_attention'])
+    gptconfig = GPTConfig(**config)
+    model = GPT(gptconfig, device)
     return model
 
