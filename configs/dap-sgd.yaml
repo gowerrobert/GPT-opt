@@ -1,9 +1,17 @@
 # config.yaml
 optimizer_params:
   - name: dap-sgd
-    lr: [0.001, 0.005, 0.01]
+    lr: [0.03]
     lr_schedule: constant
     momentum: 0.0
+    wd: 0
+    sgd_update: True
+    scalar: False
+
+  - name: dap-sgd-mom
+    lr: [0.03]
+    lr_schedule: constant
+    momentum: 0.95
     wd: 0
     sgd_update: True
     scalar: False

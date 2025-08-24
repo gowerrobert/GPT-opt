@@ -1,27 +1,25 @@
 # config.yaml
 optimizer_params:    
-  - name: dap-ns-raw
-    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.03, 0.05]
+  - name: dap-mom-ema0.95
+    lr: [0.03, 0.05]
     lr_schedule: constant
-    ema_beta: 0.0
-    momentum: 0.0
+    ema_beta: 0.95
+    momentum: 0.95
     wd: 0
     sgd_update: False
     scalar: False
-    ns_pinv_steps: 50
-    damping: 0
 
 training_params:
   tokens_processed: 262144 # 2^18  # 524288 # 2^19
   val_tokens_processed: 8388608 #2^23
-  batch_size: 16
+  batch_size: 32
   num_epochs: 1
   context_length: 1024
   gradnorm: 1.0
-  tensorcore_precision: highest   #Can be highest, high, or medium
+  tensorcore_precision: high   #Can be highest, high, or medium
   autocast: True
   mixed_precision: bfloat16
-  compile: False
+  compile: True
 
 logging_params:
   val_tokens_processed: 8388608 #2^23

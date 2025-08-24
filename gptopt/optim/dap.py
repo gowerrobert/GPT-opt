@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from gptopt.linalg_utils import ns_pinv
+from gptopt.linalg_utils import ns_pinv, ns_pinv_v2
 
 import os
 import sys
@@ -210,7 +210,8 @@ class DAP(Optimizer):
                     g32 = g.float()
 
                     if self.use_ns_pinv:
-                        C32_pinv = ns_pinv(C32, max_steps=self.ns_pinv_steps)
+                        eps = torch.linalg.norm(C32, ord=2) * 1e-3
+                        C32_pinv = ns_pinv_v2(C32, eps=eps, max_steps=self.ns_pinv_steps)
 
                         if torch.isnan(C32_pinv).any() or torch.isinf(C32_pinv).any():
                             # Save C matrix for debugging
