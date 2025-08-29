@@ -76,39 +76,87 @@ def plot_final_loss_vs_lr(outputs, colormap, outfilename, val=False):
     fig.savefig(plotfile, format='pdf', bbox_inches='tight')
 
 
-def plot_tuned_curves(outputs, colormap, linestylemap, outfilename, num_epochs, wallclock=False, val=False):
-    """Plot loss curves of tuned methods."""
+def plot_tuned_curves(outputs, colormap, outfilename, linestylemap=None, num_epochs=None, wallclock=True, val=False):
+    """
+    Plot loss curves for the best-tuned version of each optimization method.
+    
+    This function takes multiple training outputs (each with different learning rates)
+    and selects the best performing learning rate for each method based on final loss.
+    It then plots the loss curves for these optimally-tuned methods.
+    
+    Args:
+        outputs: List of dictionaries containing training results for different methods/learning rates
+        colormap: Dictionary mapping method names to colors for plotting
+        linestylemap: Dictionary mapping method names to line styles (solid, dashed, etc.). 
+                     If None, all lines will be solid.
+        outfilename: Base filename for saving the output plot
+        num_epochs: Total number of epochs for x-axis scaling (required when wallclock=False)
+        wallclock: If True, plot against wall-clock time instead of epochs
+        val: If True, use validation losses; otherwise use training losses
+    
+    Returns:
+        None (saves plot to file)
+    """
+    # Validate parameters
+    if not wallclock and num_epochs is None:
+        raise ValueError("num_epochs is required when wallclock=False")
+    
+    # Set default linestylemap if none provided
+    if linestylemap is None:
+        # Use the keys from colormap to set all methods to solid lines by default
+        linestylemap = {method_name: '-' for method_name in colormap.keys()}
+    
+    # Create matplotlib figure and axis
     fig, ax = plt.subplots(figsize=(6, 4))
     tuned_methods = {}
 
-    # Find best lr for each method.
+    # Phase 1: Find best learning rate for each method
     field = 'val_losses' if val else 'losses'
+    
     for output in outputs:
+        # Parse method name and learning rate from output filename
         name, lr = output['name'].split('-lr-')
         lr = float(lr)
         final_loss = float(output[field][-1])
+        
+        # Initialize or update best configuration for this method
         if name not in tuned_methods:
-            tuned_methods[name] = {'best_loss': final_loss, 'best_lr': lr, 'outputs': dict(output)}
+            tuned_methods[name] = {
+                'best_loss': final_loss,
+                'best_lr': lr,
+                'outputs': dict(output)
+            }
         else:
             if final_loss < tuned_methods[name]['best_loss']:
                 tuned_methods[name]['best_loss'] = final_loss
                 tuned_methods[name]['best_lr'] = lr
                 tuned_methods[name]['outputs'] = dict(output)
 
-    # Plot loss of tuned methods.
+    # Phase 2: Extract best-tuned outputs for plotting
     tuned_outputs = [tuned_methods[name]['outputs'] for name in tuned_methods]
+    
+    # Create learning rate ranges for alpha function
     lr_ranges = {name: [tuned_methods[name]['best_lr']] * 2 for name in tuned_methods}
+    
+    # Phase 3: Plot loss curves
     plot_data(ax, tuned_outputs, num_epochs, field, 'Loss', colormap, linestylemap, lr_ranges, get_alpha_from_lr, wallclock=wallclock)
+    
+    # Phase 4: Set plot aesthetics
+    # Calculate upper bound based on loss at 20% through training
     upper_bound = np.max([output[field][round(0.2 * len(output[field]))] for output in tuned_outputs])
     upper_bound = min(upper_bound, 10.0) if not np.isnan(upper_bound) else 10.0
+    
     ax.legend(loc='upper right', fontsize=10)
     ax.set_ylim(3.2, upper_bound)
     fig.subplots_adjust(top=0.99, bottom=0.155, left=0.12, right=0.99)
+    
+    # Phase 5: Save plot
     suffix = "_tuned"
     if wallclock:
         suffix += "_wallclock"
     if val:
         suffix += "_val"
+    
     fig.savefig("figures/" + outfilename + suffix + '.pdf', format='pdf', bbox_inches='tight')
 
 
@@ -226,8 +274,8 @@ def main(config_file=None):
     fig.savefig('figures/step_size-' + outfilename + '.pdf', format='pdf', bbox_inches='tight')
 
     # Plot loss curves of tuned algorithms.
-    plot_tuned_curves(outputs, colormap, linestylemap, outfilename, config['training_params']['num_epochs'], wallclock=False, val=False)
-    plot_tuned_curves(outputs, colormap, linestylemap, outfilename, config['training_params']['num_epochs'], wallclock=False, val=True)
+    plot_tuned_curves(outputs, colormap, outfilename, linestylemap, config['training_params']['num_epochs'], wallclock=False, val=False)
+    plot_tuned_curves(outputs, colormap, outfilename, linestylemap, config['training_params']['num_epochs'], wallclock=False, val=True)
     #plot_tuned_curves(outputs, colormap, linestylemap, outfilename, config['training_params']['num_epochs'], wallclock=True, val=False)
     #plot_tuned_curves(outputs, colormap, linestylemap, outfilename, config['training_params']['num_epochs'], wallclock=True, val=True)
 

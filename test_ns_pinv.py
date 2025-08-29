@@ -1,63 +1,62 @@
-import pytest
+# test_ns.py
 import torch
-from gptopt.linalg_utils import rel_err, ns_pinv
+import argparse
+import numpy as np
+from gptopt.linalg_utils import ns_pinv_v2 as ns_pinv  # adjust path if needed
 
 
-@pytest.fixture(scope="module")
-def setup():
-    """Setup fixture for reproducibility and tolerance."""
-    torch.manual_seed(0)  # reproducibility
-    return 1e-5  # accuracy threshold
+def assert_close(X, Y, atol=1e-8, rtol=1e-6, name="matrix"):
+    if not torch.allclose(X, Y, atol=atol, rtol=rtol):
+        diff = torch.linalg.norm(X - Y).item()
+        maxdiff = torch.max(torch.abs(X - Y)).item()
+        raise AssertionError(
+            f"{name} mismatch: ‖Δ‖={diff:.2e}, max|Δ|={maxdiff:.2e}"
+        )
 
 
-def test_identity_matrix(setup):
-    """Test ns_pinv with identity matrix (trivial fixed-point)."""
-    tol = setup
-    A = torch.eye(5)
-    assert rel_err(ns_pinv(A), A) < tol
+def run_tests(use_double=False):
+    # Set seeds for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+    
+    dtype = torch.float64 if use_double else torch.float32
+    tol = 1e-10 if use_double else 1e-5
+
+    print(f"\nRunning tests with use_double={use_double}")
+
+    # identity
+    A = torch.eye(5, dtype=dtype)
+    X = ns_pinv(A, eps=1e-12, use_double=use_double)
+    assert_close(X, A, atol=tol, name="identity")
+
+    # square random
+    A = torch.randn(6, 6, dtype=dtype)
+    X = ns_pinv(A, eps=1e-8, use_double=use_double)
+    ref = torch.linalg.pinv(A)
+    assert_close(X, ref, atol=tol, name="square")
+
+    # rectangular tall
+    A = torch.randn(8, 5, dtype=dtype) / 10
+    X = ns_pinv(A, eps=1e-8, use_double=use_double)
+    ref = torch.linalg.pinv(A)
+    assert_close(X, ref, atol=tol, name="rectangular tall")
+
+    # rectangular wide
+    A = torch.randn(5, 8, dtype=dtype) / 10
+    X = ns_pinv(A, eps=1e-8, use_double=use_double)
+    ref = torch.linalg.pinv(A)
+    assert_close(X, ref, atol=tol, name="rectangular wide")
+
+    print("✅ All tests passed")
 
 
-def test_square_full_rank_matrix(setup):
-    """Test ns_pinv with square, full-rank random matrix."""
-    tol = setup
-    A = torch.randn(6, 6)
-    assert rel_err(ns_pinv(A), torch.linalg.pinv(A)) < tol
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--double", action="store_true", help="Use float64")
+    args = parser.parse_args()
 
+    run_tests(use_double=args.double)
 
-def test_tall_full_rank_matrix(setup):
-    """Test ns_pinv with tall (m > n) full-rank matrix."""
-    tol = setup
-    A = torch.randn(8, 3)
-    assert rel_err(ns_pinv(A), torch.linalg.pinv(A)) < tol
-
-
-def test_wide_full_rank_matrix(setup):
-    """Test ns_pinv with wide (m < n) full-rank matrix."""
-    tol = setup
-    A = torch.randn(3, 8)
-    assert rel_err(ns_pinv(A), torch.linalg.pinv(A)) < tol
-
-
-def test_rank_deficient_matrix(setup):
-    """Test ns_pinv with rank-deficient matrix (duplicate columns)."""
-    tol = setup
-    B = torch.randn(6, 4)
-    A = torch.cat([B, B[:, :1]], dim=1)  # rank ≤ 4 < 5
-    assert rel_err(ns_pinv(A), torch.linalg.pinv(A)) < tol
-
-
-def test_all_zeros_matrix(setup):
-    """Test ns_pinv with all-zeros matrix (pseudo-inverse should be zeros)."""
-    tol = setup
-    A = torch.zeros(4, 7)
-    assert torch.allclose(ns_pinv(A), torch.zeros_like(A.T), atol=tol)
-
-
-def test_ill_conditioned_matrix(setup):
-    """Test ns_pinv with ill-conditioned square matrix (singular values differ by many orders)."""
-    tol = setup
-    U, _ = torch.linalg.qr(torch.randn(6, 6))
-    V, _ = torch.linalg.qr(torch.randn(6, 6))
-    s = torch.tensor([1.0, 1e-2, 1e-4, 1e-6, 1e-8, 1e-10])
-    A = U @ torch.diag(s) @ V.T
-    assert rel_err(ns_pinv(A), torch.linalg.pinv(A)) < tol

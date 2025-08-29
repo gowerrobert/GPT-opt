@@ -1,10 +1,11 @@
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from gptopt.linalg_utils import ns_pinv, ns_pinv_v2
+from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, power_method
 
 import os
 import sys
+import time
 
 class DAP(Optimizer):
     def __init__(
@@ -25,6 +26,11 @@ class DAP(Optimizer):
         include_embed: bool = False,
         use_ns_pinv: bool = False,
         ns_pinv_steps: int = 30,
+        rcond: float = 1e-3,
+        debug_timing: bool = True,
+        debug_timing_every: int = 1,
+        use_bf16: bool = False,
+        use_fp64: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -93,6 +99,27 @@ class DAP(Optimizer):
         self.include_embed = include_embed
         self.use_ns_pinv = use_ns_pinv
         self.ns_pinv_steps = ns_pinv_steps
+        self.rcond = rcond
+        # Debug timing controls
+        self.debug_timing = debug_timing
+        self.debug_timing_every = max(1, int(debug_timing_every))
+        self._debug_step_idx = 0
+        
+        # Precision control
+        self.rcond = float(rcond)
+        self.bf16 = bool(use_bf16)
+        self.fp64 = bool(use_fp64)
+
+        if self.bf16 and self.fp64:
+            raise ValueError("use_bf16 and use_fp64 are mutually exclusive")
+        
+        # dtype used for power_method / pinv / ns_pinv operations
+        if self.bf16:
+            self.op_dtype = torch.bfloat16
+        elif self.fp64:
+            self.op_dtype = torch.float64
+        else:
+            self.op_dtype = torch.float32
         
         assert not (self.scalar and self.sgd_update), "choose either scalar or sgd update"
 
@@ -152,6 +179,12 @@ class DAP(Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        if self.debug_timing:
+            optimizer_step_t0 = time.perf_counter()
+            total_power_method_time = 0.0
+            total_pseudo_inverse_time = 0.0
+            num_dap_params = 0
+
         for group in self.param_groups:
             ############################
             #           DAP           #
@@ -206,38 +239,62 @@ class DAP(Optimizer):
                     if damping:
                         C.diagonal().add_(damping * torch.trace(C) / C.shape[0])
 
-                    C32 = C.float()
-                    g32 = g.float()
+                    C_op = C.to(self.op_dtype)
+                    g_op = g.to(self.op_dtype)
 
                     if self.use_ns_pinv:
-                        eps = torch.linalg.norm(C32, ord=2) * 1e-3
-                        C32_pinv = ns_pinv_v2(C32, eps=eps, max_steps=self.ns_pinv_steps)
+                        if self.debug_timing:
+                            t_power_start = time.perf_counter()
 
-                        if torch.isnan(C32_pinv).any() or torch.isinf(C32_pinv).any():
+                        sig_max = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True).item()
+                        eps = sig_max * self.rcond
+
+                        if self.debug_timing:
+                            total_power_method_time += (time.perf_counter() - t_power_start)
+                            t_pinv_start = time.perf_counter()
+                        Cinv = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps)
+                        if self.debug_timing:
+                            total_pseudo_inverse_time += (time.perf_counter() - t_pinv_start)
+
+                        if torch.isnan(Cinv).any() or torch.isinf(Cinv).any():
                             # Save C matrix for debugging
                             debug_dir = "debug_matrices"
                             os.makedirs(debug_dir, exist_ok=True)
                             matrix_path = os.path.join(debug_dir, f"C_{self.param_to_name[p]}_step_{step}.pt")
                             grad_path = os.path.join(debug_dir, f"grad_{self.param_to_name[p]}_step_{step}.pt")
-                            torch.save(C32, matrix_path)
-                            torch.save(g32, grad_path)
+                            torch.save(C_op, matrix_path)
+                            torch.save(g_op, grad_path)
 
                             # Exit if we encounter NaN/inf in pseudo-inverse
                             print(f"ERROR: NaN/inf detected in pseudo-inverse calculation for parameter {self.param_to_name[p]} at step {step}")
                             print(f"Matrix saved to debug_matrices/C_{self.param_to_name[p]}_step_{step}.pt")
                             sys.exit(1)
-
-                        u32 = g32 @ C32_pinv
+                        u_op = g_op @ Cinv
                     else:
                         if self.scalar:
-                            u32 = g32 / torch.linalg.norm(C32, ord=2)
+                            if self.debug_timing:
+                                t_power_start = time.perf_counter()
+
+                            sig_max = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True).item()
+                            u_op = g_op / sig_max
+
+                            if self.debug_timing:
+                                total_power_method_time += (time.perf_counter() - t_power_start)
                         else:
                             # Precondition the gradient using the inverse covariance.
                             # Try lstsq first, fall back to pinv if it fails
-                            # u32 = torch.linalg.lstsq(C32, g32.T).solution.T
-                            u32 = g32 @ torch.linalg.pinv(C32)
+                            # u_op = torch.linalg.lstsq(C_op, g_op.T).solution.T
+                            if self.debug_timing:
+                                t_pinv_start = time.perf_counter()
+                            pinv_mat = torch.linalg.pinv(C_op)
+                            if self.debug_timing:
+                                total_pseudo_inverse_time += (time.perf_counter() - t_pinv_start)
+                            u_op = g_op @ pinv_mat
                         
-                    u = u32.to(p.dtype)
+                    u = u_op.to(p.dtype)
+
+                if self.debug_timing:
+                    num_dap_params += 1
 
                 # apply weight decay
                 p.data.mul_(1 - lr * wd)
@@ -278,6 +335,17 @@ class DAP(Optimizer):
                 scale = bias_correction1 / bias_correction2**0.5
                 p.data.mul_(1 - lr * weight_decay)
                 p.data.add_(g, alpha=-lr / scale)
+
+        if self.debug_timing:
+            optimizer_step_elapsed = time.perf_counter() - optimizer_step_t0
+            if (self._debug_step_idx % self.debug_timing_every) == 0:
+                # Print a compact one-line summary
+                print(
+                    f"[DAP] opt_step={self._debug_step_idx} "
+                    f"precond(power={total_power_method_time:.4f}s, pinv={total_pseudo_inverse_time:.4f}s) "
+                    f"params={num_dap_params} total={optimizer_step_elapsed:.4f}s"
+                )
+            self._debug_step_idx += 1
 
         return loss
     

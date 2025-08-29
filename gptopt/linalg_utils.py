@@ -37,7 +37,9 @@ def ns_pinv_v2(
     eps: float,
     max_steps: int = 100,
     use_double: bool = False,
+    use_bf16: bool = False,
     diagnostics: bool = False,
+    verbose: bool = False,
 ) -> torch.Tensor:
     """
     Newton–Schulz pseudoinverse with Söderström–Stewart rank-aware stopping.
@@ -46,6 +48,8 @@ def ns_pinv_v2(
     assert A.ndim == 2, "2-D input only"
     if use_double:
         A = A.to(torch.float64)
+    elif use_bf16:
+        A = A.to(torch.bfloat16)
 
     m, n = A.shape
     I_n = torch.eye(n, dtype=A.dtype, device=A.device)
@@ -54,6 +58,9 @@ def ns_pinv_v2(
     n1 = torch.linalg.norm(A, ord=1).item()
     ninf = torch.linalg.norm(A, ord=float("inf")).item()
     alpha0 = 1.0 / max(n1 * ninf, 1e-30)
+
+    if verbose:
+        print(f"ns_pinv_v2: m={m}, n={n}, alpha0={alpha0:.2e}")
 
     # Init
     X = alpha0 * A.T
@@ -74,15 +81,23 @@ def ns_pinv_v2(
         T_next = X_next @ A
         p = torch.trace(T_next).item()
 
+        if verbose:
+            print(f"  iter {k+1}: p={p:.6f}, p_prev={p_prev:.6f}")
+
         # Handle one or more integer crossings
         while p_prev < next_i <= p:
-            diff_norm = torch.linalg.norm(X_next - X).item()
+            diff_norm = torch.linalg.norm(X_next - X, ord='fro').item()
             sigma_hat = diff_norm / ((2.0 ** k) * alpha0 + 1e-30)
+
+            if verbose:
+                print(f"    crossing {next_i}: sigma_hat={sigma_hat:.2e}")
 
             if diagnostics:
                 stopping_values.append(sigma_hat)
 
             if sigma_hat <= eps:
+                if verbose:
+                    print(f"  converged at crossing {next_i} after {k+1} iterations")
                 if diagnostics:
                     stopped_at_crossing = True
                     resids.append(mp_residuals(A, X_next))
@@ -104,6 +119,8 @@ def ns_pinv_v2(
         X, T, p_prev = X_next, T_next, p
 
     # Fallback case
+    if verbose:
+        print(f"  reached max_steps={max_steps} without convergence")
     if diagnostics:
         return X, {
             "residuals": resids,
@@ -120,6 +137,8 @@ def ns_pinv(
     max_steps: int = 20,
     diagnostics: bool = False,
     use_double: bool = False,
+    use_bf16: bool = False,
+    verbose: bool = False,
 ):
     """
     Moore–Penrose pseudo-inverse via Newton–Schulz iteration (2-D only).
@@ -134,6 +153,10 @@ def ns_pinv(
         If True, also return Moore–Penrose residuals per iteration.
     use_double : bool
         Compute in float64 if True.
+    use_bf16 : bool
+        Compute in bfloat16 if True.
+    verbose : bool
+        If True, print iteration information.
 
     Returns
     -------
@@ -149,16 +172,23 @@ def ns_pinv(
 
     if use_double:
         M = M.double()
+    elif use_bf16:
+        M = M.bfloat16()
 
     scale = M.norm() + 1e-16
     M = M / scale
     Y = M.T                                # initial guess (n, m)
 
+    if verbose:
+        print(f"ns_pinv: shape={A.shape}, transposed={transposed}, scale={scale:.2e}")
+
     if diagnostics:
         resids = [mp_residuals(M, Y)]
 
-    for _ in range(max_steps):
+    for step in range(max_steps):
         Y_new = 2 * Y - Y @ M @ Y
+        if verbose:
+            print(f"  iter {step+1}/{max_steps}")
         if diagnostics:
             resids.append(mp_residuals(M, Y_new))
         Y = Y_new
@@ -167,6 +197,106 @@ def ns_pinv(
     if transposed:
         pinv = pinv.T
 
+    if verbose:
+        print(f"  completed {max_steps} iterations")
+
     if diagnostics:
         return pinv, {"residuals": resids}
     return pinv
+
+
+@torch.no_grad()
+def power_method(
+    A: torch.Tensor,
+    max_iters: int = 100,
+    tol: float = 1e-6,
+    psd: bool = False,
+    use_bf16: bool = False,
+    verbose: bool = False,
+) -> torch.Tensor:
+    """
+    Estimate the spectral norm (largest singular value) of A by power iteration.
+
+    If psd=True, A is assumed symmetric positive semidefinite and the method
+    performs power iteration directly on A to estimate its largest eigenvalue
+    (which equals the spectral norm). Otherwise, it performs power iteration on
+    A^T A and returns sqrt of the dominant eigenvalue.
+
+    Parameters
+    ----------
+    A : torch.Tensor
+        2-D matrix.
+    max_iters : int
+        Maximum number of iterations.
+    tol : float
+        Convergence tolerance on consecutive iterate difference.
+    psd : bool
+        If True, assume A is symmetric PSD and iterate on A.
+    use_bf16 : bool
+        Compute in bfloat16 if True.
+    verbose : bool
+        If True, print iteration information.
+
+    Returns
+    -------
+    torch.Tensor
+        Estimated spectral norm as a scalar tensor on A's device/dtype.
+    """
+    assert A.ndim == 2, "power_method expects a 2-D matrix"
+    m, n = A.shape
+    if psd:
+        assert m == n, "psd=True requires a square matrix"
+
+    device = A.device
+    dtype = A.dtype
+
+    # Convert to bfloat16 if requested
+    if use_bf16:
+        A = A.to(torch.bfloat16)
+        dtype = torch.bfloat16
+
+    if verbose:
+        print(f"power_method: shape={A.shape}, psd={psd}, tol={tol}")
+
+    # Initialize with a random nonzero vector
+    v = torch.randn(n, device=device, dtype=dtype)
+    v = v / (v.norm() + 1e-16)
+
+    for iter_num in range(max_iters):
+        v_prev = v
+        if psd:
+            w = A @ v
+        else:
+            w = A.T @ (A @ v)
+        w_norm = w.norm()
+        if w_norm == 0:
+            if verbose:
+                print(f"  iter {iter_num+1}: zero norm, stopping")
+            return torch.zeros((), device=device, dtype=dtype)
+        v = w / w_norm
+        
+        diff_norm = (v - v_prev).norm()
+        if verbose:
+            print(f"  iter {iter_num+1}: diff_norm={diff_norm:.2e}")
+        
+        if diff_norm < tol:
+            if verbose:
+                print(f"  converged after {iter_num+1} iterations")
+            break
+
+    if psd:
+        # Rayleigh quotient equals largest eigenvalue for unit vector v
+        eig_est = torch.dot(v, A @ v)
+        # Numerical safety: ensure non-negative for PSD
+        result = torch.clamp(eig_est, min=0)
+        if verbose:
+            print(f"  final eigenvalue estimate: {result:.6f}")
+        return result
+    else:
+        # Dominant eigenvalue of A^T A equals squared spectral norm
+        Av = A @ v
+        mu = torch.dot(Av, Av)
+        result = torch.sqrt(torch.clamp(mu, min=0))
+        if verbose:
+            print(f"  final spectral norm estimate: {result:.6f}")
+        return result
