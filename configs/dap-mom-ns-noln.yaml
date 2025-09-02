@@ -1,10 +1,9 @@
 # config.yaml
 optimizer_params:    
-  - name: dap-mom-ns-adam-0.95-0
-    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.03, 0.05]
+  - name: dap-mom-ns
+    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01]
     ema_beta: 0
-    dap_beta1: 0.95
-    dap_beta2: 0
+    momentum: 0.95
     wd: 0
     sgd_update: False
     scalar: False
@@ -40,6 +39,7 @@ gpt_model:
   n_head: 12    
   vocab_size: 50257
   flash_attention: True
+  no_layernorm: True
 
 dataset:
   name: "finewebmini"

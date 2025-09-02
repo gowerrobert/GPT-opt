@@ -18,6 +18,9 @@ class DAP(Optimizer):
         nesterov=True,
         damping=0.0,
         ema_beta=0.0,
+        dap_beta1: float = 0.0,
+        dap_beta2: float = 0.0,
+        dap_eps: float = 1e-8,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
         sgd_update: bool = False,
@@ -39,6 +42,9 @@ class DAP(Optimizer):
             nesterov=nesterov,
             damping=damping,
             ema_beta=ema_beta,
+            dap_beta1=dap_beta1,
+            dap_beta2=dap_beta2,
+            dap_eps=dap_eps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
         )
@@ -183,6 +189,8 @@ class DAP(Optimizer):
             optimizer_step_t0 = time.perf_counter()
             total_power_method_time = 0.0
             total_pseudo_inverse_time = 0.0
+            total_power_method_iters = 0
+            total_ns_iters = 0
             num_dap_params = 0
 
         for group in self.param_groups:
@@ -194,6 +202,9 @@ class DAP(Optimizer):
 
             momentum = group["momentum"]
             damping = group["damping"]
+            dap_beta1 = group["dap_beta1"]
+            dap_beta2 = group["dap_beta2"]
+            dap_eps = group["dap_eps"]
 
             params = [p for p in group["params"] if self.state[p]["use_dap"]]
 
@@ -207,52 +218,58 @@ class DAP(Optimizer):
                 if g.ndim > 2:
                     g = g.view(g.size(0), -1)
 
-                # calc momentum.
+                # calc momentum / first moment
                 state = self.state[p]
                 if "step" not in state:
                     state["step"] = 0
                 state["step"] += 1
                 step = state["step"]
 
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-                buf.mul_(momentum).add_(g)
-
-                # calc update. Note that we already computed and stored the momentum
-                # term before, but we are re-computing the matrix sign. This is
-                # suboptimal w.r.t.  time but doesn't use any extra memory. We can
-                # always tweak this later.
-                state = self.state[p]
-                buf = state["momentum_buffer"]
-
-                if group["nesterov"]:
-                    g = g.add(buf, alpha=momentum)
+                if dap_beta1 > 0.0:
+                    # Adam-style EMA of gradients overrides classical momentum
+                    if "dap_moment1" not in state:
+                        state["dap_moment1"] = torch.zeros_like(g)
+                    m = state["dap_moment1"]
+                    m.lerp_(g, 1 - dap_beta1)
+                    g_eff = m
                 else:
-                    g = buf
+                    # Classic momentum (optionally Nesterov)
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(g)
+                    buf = state["momentum_buffer"]
+                    buf.mul_(momentum).add_(g)
+                    if group["nesterov"]:
+                        g_eff = g.add(buf, alpha=momentum)
+                    else:
+                        g_eff = buf
                 
                 if self.sgd_update:
-                    # Plain (momentum) SGD: use gradient directly.
-                    u = g
+                    # Plain (momentum) SGD: use first-moment directly.
+                    u = g_eff
                 else:
                     C = self.state[p]["C_ema"]
                     if damping:
                         C.diagonal().add_(damping * torch.trace(C) / C.shape[0])
 
                     C_op = C.to(self.op_dtype)
-                    g_op = g.to(self.op_dtype)
+                    g_op = g_eff.to(self.op_dtype)
 
                     if self.use_ns_pinv:
                         if self.debug_timing:
                             t_power_start = time.perf_counter()
 
-                        sig_max = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True).item()
+                        sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+                        sig_max = sig_max.item()
+                        total_power_method_iters += pm_iters
                         eps = sig_max * self.rcond
 
                         if self.debug_timing:
                             total_power_method_time += (time.perf_counter() - t_power_start)
                             t_pinv_start = time.perf_counter()
-                        Cinv = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps)
+
+                        Cinv, info = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps, return_iters=True, diagnostics=False)
+                        total_ns_iters += int(info.get("iterations", 0))
+
                         if self.debug_timing:
                             total_pseudo_inverse_time += (time.perf_counter() - t_pinv_start)
 
@@ -275,8 +292,9 @@ class DAP(Optimizer):
                             if self.debug_timing:
                                 t_power_start = time.perf_counter()
 
-                            sig_max = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True).item()
+                            sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
                             u_op = g_op / sig_max
+                            total_power_method_iters += pm_iters
 
                             if self.debug_timing:
                                 total_power_method_time += (time.perf_counter() - t_power_start)
@@ -299,8 +317,22 @@ class DAP(Optimizer):
                 # apply weight decay
                 p.data.mul_(1 - lr * wd)
 
-                # apply update
-                p.data.add_(u, alpha=-lr)
+                # Bias corrections
+                bc1 = 1 - dap_beta1 ** step
+                bc2 = 1 - dap_beta2 ** step
+
+                if dap_beta2 > 0.0:
+                    # Adam-style normalization and bias correction (epsilon in denominator)
+                    if "dap_moment2" not in state:
+                        state["dap_moment2"] = torch.zeros_like(u)
+                    v = state["dap_moment2"]
+                    v.lerp_(u.square(), 1 - dap_beta2)
+                    denom = v.sqrt() / (bc2 ** 0.5) + dap_eps
+                    update = (u / bc1) / denom
+                    p.data.add_(update, alpha=-lr)
+                else:
+                    # No second-moment normalization. Always apply first-moment bias correction (bc1=1 if beta1=0)
+                    p.data.add_(u, alpha=-(lr / bc1))
 
             ############################
             #       AdamW backup       #
@@ -341,8 +373,9 @@ class DAP(Optimizer):
             if (self._debug_step_idx % self.debug_timing_every) == 0:
                 # Print a compact one-line summary
                 print(
-                    f"[DAP] opt_step={self._debug_step_idx} "
-                    f"precond(power={total_power_method_time:.4f}s, pinv={total_pseudo_inverse_time:.4f}s) "
+                    f"[DAP] step={self._debug_step_idx} "
+                    f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
+                    f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
                     f"params={num_dap_params} total={optimizer_step_elapsed:.4f}s"
                 )
             self._debug_step_idx += 1

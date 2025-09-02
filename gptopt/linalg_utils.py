@@ -38,6 +38,7 @@ def ns_pinv_v2(
     max_steps: int = 100,
     use_double: bool = False,
     use_bf16: bool = False,
+    return_iters: bool = False,
     diagnostics: bool = False,
     verbose: bool = False,
 ) -> torch.Tensor:
@@ -109,6 +110,8 @@ def ns_pinv_v2(
                         "iterations": k + 1,
                         "stopped_at_crossing": stopped_at_crossing,
                     }
+                if return_iters:
+                    return X, {"iterations": k + 1}
                 return X  # return X_v
             next_i += 1
 
@@ -129,6 +132,8 @@ def ns_pinv_v2(
             "iterations": max_steps,
             "stopped_at_crossing": stopped_at_crossing,
         }
+    if return_iters:
+        return X, {"iterations": max_steps}
     return X
 
 @torch.no_grad()
@@ -213,6 +218,7 @@ def power_method(
     psd: bool = False,
     use_bf16: bool = False,
     verbose: bool = False,
+    return_iters: bool = False,
 ) -> torch.Tensor:
     """
     Estimate the spectral norm (largest singular value) of A by power iteration.
@@ -272,7 +278,10 @@ def power_method(
         if w_norm == 0:
             if verbose:
                 print(f"  iter {iter_num+1}: zero norm, stopping")
-            return torch.zeros((), device=device, dtype=dtype)
+            zero_val = torch.zeros((), device=device, dtype=dtype)
+            if return_iters:
+                return zero_val, (iter_num + 1)
+            return zero_val
         v = w / w_norm
         
         diff_norm = (v - v_prev).norm()
@@ -291,6 +300,8 @@ def power_method(
         result = torch.clamp(eig_est, min=0)
         if verbose:
             print(f"  final eigenvalue estimate: {result:.6f}")
+        if return_iters:
+            return result, (iter_num + 1)
         return result
     else:
         # Dominant eigenvalue of A^T A equals squared spectral norm
@@ -299,4 +310,6 @@ def power_method(
         result = torch.sqrt(torch.clamp(mu, min=0))
         if verbose:
             print(f"  final spectral norm estimate: {result:.6f}")
+        if return_iters:
+            return result, (iter_num + 1)
         return result
