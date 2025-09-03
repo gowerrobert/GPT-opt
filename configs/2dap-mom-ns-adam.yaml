@@ -1,23 +1,11 @@
 # config.yaml
 optimizer_params:
-  - name: dap-mom-ns-adam-0.95-0
-    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.03, 0.05]
-    ema_beta: 0
-    dap_beta1: 0.95
-    dap_beta2: 0
-    wd: 0
-    sgd_update: False
-    scalar: False
-    ns_pinv_steps: 50
-    damping: 0
-    lr_schedule: constant
-    rcond: 1e-3
-
   - name: dap-mom-ns-adam-0.95-0.999
-    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.03, 0.05]
+    lr: [0.001]
     ema_beta: 0
     dap_beta1: 0.95
     dap_beta2: 0.999
+    momentum: 0
     wd: 0
     sgd_update: False
     scalar: False

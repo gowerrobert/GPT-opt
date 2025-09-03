@@ -34,6 +34,7 @@ class DAP(Optimizer):
         debug_timing_every: int = 1,
         use_bf16: bool = False,
         use_fp64: bool = False,
+        moments_on_precond: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -47,6 +48,7 @@ class DAP(Optimizer):
             dap_eps=dap_eps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
+            moments_on_precond=moments_on_precond,
         )
 
         dap_params, dap_params_names = [], []
@@ -172,6 +174,86 @@ class DAP(Optimizer):
 
             module.register_forward_hook(make_hook(p_ref), prepend=False)
 
+    def _precondition(self, tensor: torch.Tensor, C: torch.Tensor, p: torch.Tensor, step: int):
+        """Precondition a gradient-like tensor using covariance C.
+        Returns (preconditioned_tensor, pm_time, pinv_time, pm_iters, ns_iters).
+        """
+        pm_time = 0.0
+        pinv_time = 0.0
+        pm_iters = 0
+        ns_iters = 0
+
+        C_op = C.to(self.op_dtype)
+        v_op = tensor.to(self.op_dtype)
+
+        if self.use_ns_pinv:
+            if self.debug_timing:
+                t_power_start = time.perf_counter()
+            sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+            sig_max = sig_max.item()
+            eps = sig_max * self.rcond
+            if self.debug_timing:
+                pm_time += (time.perf_counter() - t_power_start)
+                t_pinv_start = time.perf_counter()
+
+            Cinv, info = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps, return_iters=True, diagnostics=False)
+            ns_iters = int(info.get("iterations", 0))
+
+            if self.debug_timing:
+                pinv_time += (time.perf_counter() - t_pinv_start)
+
+            if torch.isnan(Cinv).any() or torch.isinf(Cinv).any():
+                debug_dir = "debug_matrices"
+                os.makedirs(debug_dir, exist_ok=True)
+                matrix_path = os.path.join(debug_dir, f"C_{self.param_to_name[p]}_step_{step}.pt")
+                grad_path = os.path.join(debug_dir, f"grad_{self.param_to_name[p]}_step_{step}.pt")
+                torch.save(C_op, matrix_path)
+                torch.save(v_op, grad_path)
+                print(f"ERROR: NaN/inf detected in pseudo-inverse calculation for parameter {self.param_to_name[p]} at step {step}")
+                print(f"Matrix saved to debug_matrices/C_{self.param_to_name[p]}_step_{step}.pt")
+                sys.exit(1)
+
+            u_local = v_op @ Cinv
+        else:
+            if self.scalar:
+                if self.debug_timing:
+                    t_power_start = time.perf_counter()
+                sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+                u_local = v_op / sig_max
+                if self.debug_timing:
+                    pm_time += (time.perf_counter() - t_power_start)
+            else:
+                if self.debug_timing:
+                    t_pinv_start = time.perf_counter()
+                pinv_mat = torch.linalg.pinv(C_op)
+                if self.debug_timing:
+                    pinv_time += (time.perf_counter() - t_pinv_start)
+                u_local = v_op @ pinv_mat
+
+        return u_local.to(p.dtype), pm_time, pinv_time, pm_iters, ns_iters
+
+    def _apply_first_moment(self, tensor: torch.Tensor, state: dict, momentum: float, nesterov: bool, beta1: float, prefix: str = ""):
+        """Apply Adam beta1 EMA or classical momentum on the given tensor.
+        Prefix controls state keys suffix (e.g., "", "_pre"). Returns the updated tensor.
+        """
+        if beta1 > 0.0:
+            key = f"dap_moment1{prefix}"
+            if key not in state:
+                state[key] = torch.zeros_like(tensor)
+            m = state[key]
+            m.lerp_(tensor, 1 - beta1)
+            return m
+        else:
+            key = f"momentum_buffer{prefix}"
+            if key not in state:
+                state[key] = torch.zeros_like(tensor)
+            buf = state[key]
+            buf.mul_(momentum).add_(tensor)
+            if nesterov:
+                return tensor.add(buf, alpha=momentum)
+            else:
+                return buf
+
     @torch.no_grad()
     def step(self, closure=None):
         """Perform a single optimization step.
@@ -205,6 +287,7 @@ class DAP(Optimizer):
             dap_beta1 = group["dap_beta1"]
             dap_beta2 = group["dap_beta2"]
             dap_eps = group["dap_eps"]
+            moments_on_precond = group.get("moments_on_precond", False)
 
             params = [p for p in group["params"] if self.state[p]["use_dap"]]
 
@@ -218,98 +301,45 @@ class DAP(Optimizer):
                 if g.ndim > 2:
                     g = g.view(g.size(0), -1)
 
-                # calc momentum / first moment
+                # calc momentum / first moment and preconditioning based on mode
                 state = self.state[p]
                 if "step" not in state:
                     state["step"] = 0
                 state["step"] += 1
                 step = state["step"]
 
-                if dap_beta1 > 0.0:
-                    # Adam-style EMA of gradients overrides classical momentum
-                    if "dap_moment1" not in state:
-                        state["dap_moment1"] = torch.zeros_like(g)
-                    m = state["dap_moment1"]
-                    m.lerp_(g, 1 - dap_beta1)
-                    g_eff = m
-                else:
-                    # Classic momentum (optionally Nesterov)
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(g)
-                    buf = state["momentum_buffer"]
-                    buf.mul_(momentum).add_(g)
-                    if group["nesterov"]:
-                        g_eff = g.add(buf, alpha=momentum)
-                    else:
-                        g_eff = buf
-                
                 if self.sgd_update:
-                    # Plain (momentum) SGD: use first-moment directly.
-                    u = g_eff
+                    # Plain (momentum) SGD: moments on raw gradient only
+                    u = self._apply_first_moment(g, state, momentum, group["nesterov"], dap_beta1, prefix="")
+                    second_moment_src = u
                 else:
+                    # Build covariance (with optional damping)
                     C = self.state[p]["C_ema"]
                     if damping:
                         C.diagonal().add_(damping * torch.trace(C) / C.shape[0])
 
-                    C_op = C.to(self.op_dtype)
-                    g_op = g_eff.to(self.op_dtype)
+                    # Preconditioning will be invoked via _precondition directly and timing aggregated inline
 
-                    if self.use_ns_pinv:
+                    if moments_on_precond:
+                        # First precondition the raw gradient, then apply first moment on preconditioned
+                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(g, C, p, step)
                         if self.debug_timing:
-                            t_power_start = time.perf_counter()
-
-                        sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
-                        sig_max = sig_max.item()
-                        total_power_method_iters += pm_iters
-                        eps = sig_max * self.rcond
-
-                        if self.debug_timing:
-                            total_power_method_time += (time.perf_counter() - t_power_start)
-                            t_pinv_start = time.perf_counter()
-
-                        Cinv, info = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps, return_iters=True, diagnostics=False)
-                        total_ns_iters += int(info.get("iterations", 0))
-
-                        if self.debug_timing:
-                            total_pseudo_inverse_time += (time.perf_counter() - t_pinv_start)
-
-                        if torch.isnan(Cinv).any() or torch.isinf(Cinv).any():
-                            # Save C matrix for debugging
-                            debug_dir = "debug_matrices"
-                            os.makedirs(debug_dir, exist_ok=True)
-                            matrix_path = os.path.join(debug_dir, f"C_{self.param_to_name[p]}_step_{step}.pt")
-                            grad_path = os.path.join(debug_dir, f"grad_{self.param_to_name[p]}_step_{step}.pt")
-                            torch.save(C_op, matrix_path)
-                            torch.save(g_op, grad_path)
-
-                            # Exit if we encounter NaN/inf in pseudo-inverse
-                            print(f"ERROR: NaN/inf detected in pseudo-inverse calculation for parameter {self.param_to_name[p]} at step {step}")
-                            print(f"Matrix saved to debug_matrices/C_{self.param_to_name[p]}_step_{step}.pt")
-                            sys.exit(1)
-                        u_op = g_op @ Cinv
-                    else:
-                        if self.scalar:
-                            if self.debug_timing:
-                                t_power_start = time.perf_counter()
-
-                            sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
-                            u_op = g_op / sig_max
+                            total_power_method_time += pm_time
+                            total_pseudo_inverse_time += pinv_time
                             total_power_method_iters += pm_iters
-
-                            if self.debug_timing:
-                                total_power_method_time += (time.perf_counter() - t_power_start)
-                        else:
-                            # Precondition the gradient using the inverse covariance.
-                            # Try lstsq first, fall back to pinv if it fails
-                            # u_op = torch.linalg.lstsq(C_op, g_op.T).solution.T
-                            if self.debug_timing:
-                                t_pinv_start = time.perf_counter()
-                            pinv_mat = torch.linalg.pinv(C_op)
-                            if self.debug_timing:
-                                total_pseudo_inverse_time += (time.perf_counter() - t_pinv_start)
-                            u_op = g_op @ pinv_mat
-                        
-                    u = u_op.to(p.dtype)
+                            total_ns_iters += ns_iters
+                        u = self._apply_first_moment(u_pre, state, momentum, group["nesterov"], dap_beta1, prefix="_pre")
+                        second_moment_src = u_pre
+                    else:
+                        # First compute momentum/EMA on raw gradient, then precondition
+                        g_eff = self._apply_first_moment(g, state, momentum, group["nesterov"], dap_beta1, prefix="")
+                        u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(g_eff, C, p, step)
+                        if self.debug_timing:
+                            total_power_method_time += pm_time
+                            total_pseudo_inverse_time += pinv_time
+                            total_power_method_iters += pm_iters
+                            total_ns_iters += ns_iters
+                        second_moment_src = u
 
                 if self.debug_timing:
                     num_dap_params += 1
@@ -326,7 +356,7 @@ class DAP(Optimizer):
                     if "dap_moment2" not in state:
                         state["dap_moment2"] = torch.zeros_like(u)
                     v = state["dap_moment2"]
-                    v.lerp_(u.square(), 1 - dap_beta2)
+                    v.lerp_(second_moment_src.square(), 1 - dap_beta2)
                     denom = v.sqrt() / (bc2 ** 0.5) + dap_eps
                     update = (u / bc1) / denom
                     p.data.add_(update, alpha=-lr)

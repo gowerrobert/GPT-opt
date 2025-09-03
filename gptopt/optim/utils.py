@@ -144,6 +144,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'sgd_update': sgd_update,
                   'include_output': include_output,
                   'include_embed': include_embed,
+                  'moments_on_precond': opt_config.get('moments_on_precond', False),
                   }
 
     elif 'muon' in name:
