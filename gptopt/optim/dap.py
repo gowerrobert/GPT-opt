@@ -36,6 +36,7 @@ class DAP(Optimizer):
         use_fp64: bool = False,
         moments_on_precond: bool = False,
         adagradnorm: bool = False,
+        refresh_precond_iters=None,
     ):
         defaults = dict(
             lr=lr,
@@ -132,6 +133,13 @@ class DAP(Optimizer):
             self.op_dtype = torch.float32
         
         assert not (self.scalar and self.sgd_update), "choose either scalar or sgd update"
+
+        # Control how often to refresh preconditioned vector; None disables caching
+        if refresh_precond_iters is not None:
+            refresh_precond_iters = int(refresh_precond_iters)
+            if refresh_precond_iters <= 0:
+                refresh_precond_iters = None
+        self.refresh_precond_iters = refresh_precond_iters
 
         # Register hooks only if we actually intend to use the covariance statistics.
         if not self.sgd_update:
@@ -233,6 +241,32 @@ class DAP(Optimizer):
                 u_local = v_op @ pinv_mat
 
         return u_local.to(p.dtype), pm_time, pinv_time, pm_iters, ns_iters
+
+    def _precondition_cached(self, tensor: torch.Tensor, C: torch.Tensor, p: torch.Tensor, step: int, cache_key: str):
+        """Wrapper over _precondition that optionally caches the result for a number of steps.
+        If self.refresh_precond_iters is None, always recomputes.
+        When caching, stores results under state[p][f"precond_cache_{cache_key}"] and associated step.
+        Returns (u, pm_time, pinv_time, pm_iters, ns_iters), where timing/iters are zero if reused from cache.
+        """
+        refresh = self.refresh_precond_iters
+        if refresh is None:
+            return self._precondition(tensor, C, p, step)
+
+        state = self.state[p]
+        cache_val_key = f"precond_cache_{cache_key}"
+        cache_step_key = f"precond_cache_step_{cache_key}"
+        last_step = state.get(cache_step_key, None)
+        should_recompute = (last_step is None) or ((step - last_step) >= refresh)
+
+        if should_recompute:
+            u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(tensor, C, p, step)
+            # store a cloned tensor to avoid unexpected in-place mutations
+            state[cache_val_key] = u.clone()
+            state[cache_step_key] = step
+            return u, pm_time, pinv_time, pm_iters, ns_iters
+        else:
+            u = state[cache_val_key]
+            return u, 0.0, 0.0, 0, 0
 
     def _apply_first_moment(self, tensor: torch.Tensor, state: dict, momentum: float, nesterov: bool, beta1: float, prefix: str = ""):
         """Apply Adam beta1 EMA or classical momentum on the given tensor.
@@ -341,7 +375,9 @@ class DAP(Optimizer):
                     # Preconditioning will be invoked via _precondition directly and timing aggregated inline
                     if moments_on_precond:
                         # First precondition the raw gradient, then apply first moment on preconditioned
-                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(g, C, p, step)
+                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                            g, C, p, step, cache_key="grad"
+                        )
                         if self.debug_timing:
                             total_power_method_time += pm_time
                             total_pseudo_inverse_time += pinv_time
@@ -365,7 +401,9 @@ class DAP(Optimizer):
                         else:
                             num_grad = m_t
 
-                        u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(num_grad, C, p, step)
+                        u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                            num_grad, C, p, step, cache_key="numgrad"
+                        )
                         if self.debug_timing:
                             total_power_method_time += pm_time
                             total_pseudo_inverse_time += pinv_time
