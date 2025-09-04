@@ -11,6 +11,7 @@ optimizer_params:
     scalar: False
     ns_pinv_steps: 50
     damping: 0
+    nesterov: False
     lr_schedule: constant
     rcond: 1e-3
 

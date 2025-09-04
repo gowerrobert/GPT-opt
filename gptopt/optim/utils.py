@@ -59,7 +59,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         opt_obj = torch.optim.Adam
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
-                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'betas': opt_config.get('betas', (0.95, 0.999)),
                   'eps': opt_config.get('eps', 1e-8),
                   'fused': True
                   }
@@ -145,6 +145,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'include_output': include_output,
                   'include_embed': include_embed,
                   'moments_on_precond': opt_config.get('moments_on_precond', False),
+                  'adagradnorm': opt_config.get('adagradnorm', False),
                   }
 
     elif 'muon' in name:

@@ -1,12 +1,9 @@
 # config.yaml
 optimizer_params:
-  - name: dap-sgd-mom
-    lr: [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.03, 0.05]
+  - name: adam
+    lr: [0.00001, 0.00005, 0.0001, 0.0002, 0.0003, 0.0005, 0.0007, 0.001]
+    betas: [0.95, 0.999]
     lr_schedule: constant
-    momentum: 0.95
-    wd: 0
-    sgd_update: True
-    scalar: False
 
 training_params:
   tokens_processed: 262144 # 2^18  # 524288 # 2^19
