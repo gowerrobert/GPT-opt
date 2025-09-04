@@ -117,11 +117,11 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         
     elif 'dap' in name:
         opt_obj = DAP
-        sgd_update = 'sgd' in name
-        scalar = 'scalar' in name
-        include_output = 'output' in name
-        include_embed = 'embed' in name
-        use_ns_pinv = 'ns' in name
+        sgd_update = opt_config.get('sgd_update', False) or 'sgd' in name
+        scalar = opt_config.get('scalar', False) or 'scalar' in name
+        include_output = opt_config.get('include_output', False) or 'output' in name
+        include_embed = opt_config.get('include_embed', False) or 'embed' in name
+        use_ns_pinv = opt_config.get('use_ns_pinv', False) or 'ns' in name
         hyperp = {'lr': lr,
                   'wd': opt_config.get('wd', 0.1),
                   'momentum': opt_config.get('momentum', 0.95),
