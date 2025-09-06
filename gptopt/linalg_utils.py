@@ -23,12 +23,64 @@ def mp_residuals(A: torch.Tensor, X: torch.Tensor) -> dict[str, float]:
     err_proj_AX = rel_err(AX, AX @ AX)
     err_proj_XA = rel_err(XA, XA @ XA)
 
-    return {
+    metrics = {
         "AXA": err_AXA,
         "XAX": err_XAX,
         "AX_proj": err_proj_AX,
         "XA_proj": err_proj_XA,
+        # if A is low rank, this might not converge:
+        "AX": rel_err(AX, torch.eye(AX.shape[0], device=AX.device, dtype=AX.dtype)),
     }
+    if X.shape[0] == X.shape[1]:
+        metrics = metrics | {"sym": rel_err(X, X.T),}
+    return metrics
+
+
+@torch.no_grad()
+def accelerated_ns_pinv(
+    A: torch.Tensor,
+    l,  # should these be 0-dimensional torch.Tensors?
+    u, 
+    max_step: int,
+    psd: bool = True,
+    dtype: torch.dtype = torch.float32,
+    diagnostics: bool = False,
+) -> torch.Tensor:
+
+    assert A.ndim == 2, "2-D input only"
+    m, n = A.shape
+    assert m == n, "Input must be square"
+    assert 0 < l < u, "Require 0 < l < u"
+
+    A = A.to(dtype)
+    I_n = torch.eye(n, dtype=A.dtype, device=A.device)
+    if psd:
+        Y = (2/(u + l)) * I_n
+        r = (u - l) / (u + l)
+        # inv_kappa = l / u
+        # denom = 1 + inv_kappa * (6 + inv_kappa)
+        # Y = (8 / (u * denom)) * ((1+inv_kappa)*I_n - A.T / u)
+        # r = (1 - inv_kappa)**2 / denom
+    else:
+        Y = (2/(u**2 + l**2)) * A.T
+        r = (u**2 - l**2) / (u**2 + l**2)
+
+    if diagnostics:
+        resids = [mp_residuals(A, Y)]
+
+    for _ in range(max_step):
+        denom = 2 - r**2
+        Y = Y @ (2*I_n - A @ Y) * (2 / denom)
+        # Y = (2*Y - Y @ A @ Y) * (2 / denom)
+        r = r**2 / denom
+
+        if diagnostics:
+            resids.append(mp_residuals(A, Y))
+
+    if diagnostics:
+        return Y, {"residuals": resids}
+    else:
+        return Y
 
 
 @torch.no_grad()
@@ -56,8 +108,8 @@ def ns_pinv_v2(
     I_n = torch.eye(n, dtype=A.dtype, device=A.device)
 
     # Safe start scale α0 = 1 / (||A||_1 ||A||_∞)
-    n1 = torch.linalg.norm(A, ord=1).item()
-    ninf = torch.linalg.norm(A, ord=float("inf")).item()
+    n1 = torch.linalg.norm(A, ord=1).item()  # max(sum(abs(x), dim=0))
+    ninf = torch.linalg.norm(A, ord=float("inf")).item()  # max(sum(abs(x), dim=1))
     alpha0 = 1.0 / max(n1 * ninf, 1e-30)
 
     if verbose:
@@ -110,9 +162,10 @@ def ns_pinv_v2(
                         "iterations": k + 1,
                         "stopped_at_crossing": stopped_at_crossing,
                     }
-                if return_iters:
+                elif return_iters:
                     return X, {"iterations": k + 1}
-                return X  # return X_v
+                else:
+                    return X  # return X_v
             next_i += 1
 
         if diagnostics:
