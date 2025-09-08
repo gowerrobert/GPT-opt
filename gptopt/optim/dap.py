@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.optim import Optimizer
-from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, power_method
+from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, accelerated_ns_pinv, power_method
 
 import os
 import sys
@@ -37,6 +37,7 @@ class DAP(Optimizer):
         moments_on_precond: bool = False,
         adagradnorm: bool = False,
         refresh_precond_iters=None,
+        accelerated: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -121,6 +122,8 @@ class DAP(Optimizer):
         self.bf16 = bool(use_bf16)
         self.fp64 = bool(use_fp64)
 
+        self.accelerated = accelerated
+
         if self.bf16 and self.fp64:
             raise ValueError("use_bf16 and use_fp64 are mutually exclusive")
         
@@ -198,18 +201,48 @@ class DAP(Optimizer):
 
         if self.use_ns_pinv:
             if self.debug_timing:
+                torch.cuda.synchronize()
                 t_power_start = time.perf_counter()
-            sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+            sig_max, pm_iters = torch.linalg.norm(C_op, ord='fro'), 0
             sig_max = sig_max.item()
             eps = sig_max * self.rcond
             if self.debug_timing:
+                torch.cuda.synchronize()
                 pm_time += (time.perf_counter() - t_power_start)
                 t_pinv_start = time.perf_counter()
 
-            Cinv, info = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps, return_iters=True, diagnostics=False)
+            if self.accelerated == "add_eps_1e-3":
+                Cinv, info = accelerated_ns_pinv(
+                    C_op,
+                    l=eps,
+                    u=1.2*sig_max,
+                    max_steps=self.ns_pinv_steps,
+                    psd=True,
+                    add_eps=1e-3,  # note this is absolute, not relative to sig_max, unlike the others
+                    early_stop_eps=eps,
+                    dtype=torch.float32,
+                    diagnostics=False,
+                    return_iters=True,
+                )                
+            elif self.accelerated:
+                Cinv, info = accelerated_ns_pinv(
+                    C_op,
+                    l=eps,
+                    u=1.2*sig_max,
+                    max_steps=self.ns_pinv_steps,
+                    psd=False,  # for now
+                    add_eps=0,
+                    early_stop_eps=eps,
+                    dtype=torch.float32,
+                    diagnostics=False,
+                    return_iters=True,
+                )
+            else:
+                Cinv, info = ns_pinv_v2(C_op, eps=eps, max_steps=self.ns_pinv_steps, return_iters=True, diagnostics=False)
             ns_iters = int(info.get("iterations", 0))
 
             if self.debug_timing:
+                torch.cuda.synchronize()
                 pinv_time += (time.perf_counter() - t_pinv_start)
 
             if torch.isnan(Cinv).any() or torch.isinf(Cinv).any():
@@ -227,16 +260,20 @@ class DAP(Optimizer):
         else:
             if self.scalar:
                 if self.debug_timing:
+                    torch.cuda.synchronize()
                     t_power_start = time.perf_counter()
                 sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
                 u_local = v_op / sig_max
                 if self.debug_timing:
+                    torch.cuda.synchronize()
                     pm_time += (time.perf_counter() - t_power_start)
             else:
                 if self.debug_timing:
+                    torch.cuda.synchronize()
                     t_pinv_start = time.perf_counter()
                 pinv_mat = torch.linalg.pinv(C_op)
                 if self.debug_timing:
+                    torch.cuda.synchronize()
                     pinv_time += (time.perf_counter() - t_pinv_start)
                 u_local = v_op @ pinv_mat
 
@@ -319,6 +356,7 @@ class DAP(Optimizer):
                 loss = closure()
 
         if self.debug_timing:
+            torch.cuda.synchronize()
             optimizer_step_t0 = time.perf_counter()
             total_power_method_time = 0.0
             total_pseudo_inverse_time = 0.0
@@ -480,6 +518,7 @@ class DAP(Optimizer):
                 p.data.add_(g, alpha=-lr / scale)
 
         if self.debug_timing:
+            torch.cuda.synchronize()
             optimizer_step_elapsed = time.perf_counter() - optimizer_step_t0
             if (self._debug_step_idx % self.debug_timing_every) == 0:
                 # Print a compact one-line summary

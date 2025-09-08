@@ -54,7 +54,7 @@ def plot_final_loss_vs_lr(outputs, colormap, outfilename, val=False):
         sorted_indices = sorted(range(len(data['lrs'])), key=lambda i: data['lrs'][i])  # Sort by learning rate
         sorted_lrs = [data['lrs'][i] for i in sorted_indices]
         sorted_losses = [data['losses'][i] for i in sorted_indices]
-        ax.plot(sorted_lrs, sorted_losses, label=name, color=colormap[name], linewidth=2)
+        ax.plot(sorted_lrs, sorted_losses, label=name, color=colormap[name], linewidth=2, marker='.')
         current_ub = np.max(sorted_losses)
         if current_ub > upper_bound:
             upper_bound = current_ub

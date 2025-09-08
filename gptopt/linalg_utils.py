@@ -41,12 +41,13 @@ def accelerated_ns_pinv(
     A: torch.Tensor,
     l,  # should this be 0-dimensional torch.Tensors?
     u,
-    max_step: int,
+    max_steps: int,
     psd: bool = True,
     add_eps: float = 0,
     early_stop_eps: float = 0,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = None,
     diagnostics: bool = False,
+    return_iters: bool = False,
 ) -> torch.Tensor:
 
     assert A.ndim == 2, "2-D input only"
@@ -58,7 +59,7 @@ def accelerated_ns_pinv(
     scale = u + 1e-10
     A = A / scale
     u = 1; l /= scale; add_eps /= scale; early_stop_eps /= scale
-    A = A.to(dtype)
+    if dtype: A = A.to(dtype)
 
     I_m = torch.eye(m, dtype=A.dtype, device=A.device)
     assert add_eps == 0 or m == n, "add_eps only makes sense for symmetric"
@@ -97,7 +98,7 @@ def accelerated_ns_pinv(
         else:
             resids = [mp_residuals(A, Y)]
 
-    for _ in range(max_step):
+    for step in range(max_steps):
         denom = 2 - r**2
         Y = Y @ (2*I_m - A @ Y) * (2 / denom)
         # Y = (2*Y - Y @ A @ Y) * (2 / denom)
@@ -118,6 +119,8 @@ def accelerated_ns_pinv(
 
     if diagnostics:
         return Y, {"residuals": resids}
+    elif return_iters:
+        return Y, {"iterations": step}
     else:
         return Y
 
