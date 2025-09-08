@@ -1,21 +1,32 @@
 # config.yaml
-optimizer_params:
-  - name: muon
-    lr: [0.00001, 0.00005, 0.0001, 0.0002, 0.0003, 0.0005, 0.0007, 0.001]
-    weight_decay: 0.0
+optimizer_params:    
+  - name: dap-mom-ns-f2
+    lr: [0.001, 0.005]
+    ema_beta: 0
+    dap_beta1: 0
+    dap_beta2: 0
+    momentum: 0.95
+    wd: 0
+    sgd_update: False
+    scalar: False
+    ns_pinv_steps: 50
+    damping: 0
     lr_schedule: constant
+    nesterov: True
+    rcond: 1e-3
+    refresh_precond_iters: 2
 
 training_params:
   tokens_processed: 262144 # 2^18  # 524288 # 2^19
   val_tokens_processed: 8388608 #2^23
-  batch_size: 8
+  batch_size: 16
   num_epochs: 1
   context_length: 1024
   gradnorm: 1.0
   tensorcore_precision: highest   #Can be highest, high, or medium
   autocast: True
   mixed_precision: bfloat16
-  compile: True
+  compile: False
 
 logging_params:
   val_tokens_processed: 8388608 #2^23

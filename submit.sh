@@ -12,6 +12,7 @@ sbatch <<EOF
 #SBATCH --time=60:00:00
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100
+#SBATCH --exclude=workergpu027
 #SBATCH -o output/slurm_logs/${CONFIG_NAME}.log
 #SBATCH -e output/slurm_logs/${CONFIG_NAME}.err
 

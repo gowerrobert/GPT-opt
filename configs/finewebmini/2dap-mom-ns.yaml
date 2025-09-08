@@ -1,8 +1,8 @@
 # config.yaml
 optimizer_params:    
-  - name: dap-mom-ns-f10
-    lr: [0.0001, 0.0005]
-    ema_beta: 0
+  - name: dap-mom-ns-ema0.95-f2
+    lr: [0.01, 0.05]
+    ema_beta: 0.95
     dap_beta1: 0
     dap_beta2: 0
     momentum: 0.95
@@ -14,7 +14,7 @@ optimizer_params:
     lr_schedule: constant
     nesterov: True
     rcond: 1e-3
-    refresh_precond_iters: 10
+    refresh_precond_iters: 2
 
 training_params:
   tokens_processed: 262144 # 2^18  # 524288 # 2^19

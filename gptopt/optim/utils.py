@@ -59,11 +59,27 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         opt_obj = torch.optim.Adam
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
-                  'betas': opt_config.get('betas', (0.95, 0.999)),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
                   'eps': opt_config.get('eps', 1e-8),
                   'fused': True
                   }
-    
+    elif name == 'nadam':
+        opt_obj = torch.optim.NAdam
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'momentum_decay': opt_config.get('momentum_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'eps': opt_config.get('eps', 1e-8),
+                  }
+    elif name == 'nadamw':
+        opt_obj = torch.optim.NAdam
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'momentum_decay': opt_config.get('momentum_decay', 0),
+                  'decoupled_weight_decay': opt_config.get('decoupled_weight_decay', True),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'eps': opt_config.get('eps', 1e-8),
+                  }
     elif name == 'adamw':
         opt_obj = torch.optim.AdamW
         hyperp = {'lr': lr,

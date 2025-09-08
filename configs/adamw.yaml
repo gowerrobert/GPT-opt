@@ -1,38 +1,29 @@
 # config.yaml
-optimizer_params:    
-  - name: dap-mom-ns-f10
-    lr: [0.001, 0.005]
-    ema_beta: 0
-    dap_beta1: 0
-    dap_beta2: 0
-    momentum: 0.95
-    wd: 0
-    sgd_update: False
-    scalar: False
-    ns_pinv_steps: 50
-    damping: 0
-    lr_schedule: constant
-    nesterov: True
-    rcond: 1e-3
-    refresh_precond_iters: 10
+optimizer_params:
+  - name: adamw
+    lr: [0.00001, 0.00003, 0.0001, 0.0003, 0.001, 0.003]
+    betas: [0.95, 0.95]
+    weight_decay: 0.1
+    lr_schedule: constant-linear
+    warm_up_fraction: 0.4
 
 training_params:
-  tokens_processed: 262144 # 2^18  # 524288 # 2^19
+  tokens_processed: 524288 # 2^19
   val_tokens_processed: 8388608 #2^23
-  batch_size: 16
+  batch_size: 64
   num_epochs: 1
   context_length: 1024
   gradnorm: 1.0
   tensorcore_precision: highest   #Can be highest, high, or medium
   autocast: True
   mixed_precision: bfloat16
-  compile: False
+  compile: True
 
 logging_params:
   val_tokens_processed: 8388608 #2^23
-  log_step: 50
-  val_step: 50
-  save_ckpt_step: 100
+  log_step: 256
+  val_step: 256
+  save_ckpt_step: 512
   load_ckpt_step: 0
   keep_last: 2
   ckpt_dir: "" #/mnt/ceph/users/cmodi/gptopt/
@@ -45,4 +36,4 @@ gpt_model:
   flash_attention: True
 
 dataset:
-  name: "finewebmini"
+  name: "fineweb1B"

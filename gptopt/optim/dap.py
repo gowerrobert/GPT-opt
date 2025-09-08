@@ -115,6 +115,8 @@ class DAP(Optimizer):
         self.debug_timing = debug_timing
         self.debug_timing_every = max(1, int(debug_timing_every))
         self._debug_step_idx = 0
+        # Accumulator for average relative Frobenius change of C_ema per step
+        self._C_ema_rel_change_accum = 0.0
         
         # Precision control
         self.rcond = float(rcond)
@@ -177,6 +179,15 @@ class DAP(Optimizer):
                     if "C_ema" not in state or self.ema_beta == 0:
                         state["C_ema"] = C_new
                     else:
+                        if self.debug_timing:
+                            # Compute relative Frobenius change of C_ema using EMA update
+                            C_prev = state["C_ema"]
+                            diff = C_new - C_prev
+                            num_f = torch.norm(diff, p='fro')
+                            denom = torch.norm(C_prev, p='fro').clamp_min(1e-12)
+                            rel_change = (1.0 - self.ema_beta) * (num_f / denom)
+                            self._C_ema_rel_change_accum += float(rel_change.item())
+
                         state["C_ema"].mul_(self.ema_beta).add_(
                             C_new, alpha=1 - self.ema_beta
                         )
@@ -235,7 +246,8 @@ class DAP(Optimizer):
             else:
                 if self.debug_timing:
                     t_pinv_start = time.perf_counter()
-                pinv_mat = torch.linalg.pinv(C_op)
+                pinv_mat = torch.linalg.pinv(C_op, rtol=self.rcond)
+
                 if self.debug_timing:
                     pinv_time += (time.perf_counter() - t_pinv_start)
                 u_local = v_op @ pinv_mat
@@ -372,6 +384,8 @@ class DAP(Optimizer):
                     if damping:
                         C.diagonal().add_(damping * torch.trace(C) / C.shape[0])
 
+                    # TODO: on iterations where we do not need to compute new preconditioner, we should skip power_method
+
                     # Preconditioning will be invoked via _precondition directly and timing aggregated inline
                     if moments_on_precond:
                         # First precondition the raw gradient, then apply first moment on preconditioned
@@ -483,13 +497,19 @@ class DAP(Optimizer):
             optimizer_step_elapsed = time.perf_counter() - optimizer_step_t0
             if (self._debug_step_idx % self.debug_timing_every) == 0:
                 # Print a compact one-line summary
+                # Average relative Frobenius change over DAP params captured during fwd hooks
+                avg_C_ema_rel_change = (self._C_ema_rel_change_accum / max(num_dap_params, 1))
                 print(
                     f"[DAP] step={self._debug_step_idx} "
                     f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
                     f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
-                    f"params={num_dap_params} total={optimizer_step_elapsed:.4f}s"
+                    f"params={num_dap_params} "
+                    f"Crel={avg_C_ema_rel_change:.6f} "
+                    f"total={optimizer_step_elapsed:.4f}s"
                 )
             self._debug_step_idx += 1
+            # Reset accumulator for next step
+            self._C_ema_rel_change_accum = 0.0
 
         return loss
     
