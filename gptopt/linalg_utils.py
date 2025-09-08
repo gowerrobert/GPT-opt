@@ -44,6 +44,7 @@ def accelerated_ns_pinv(
     max_step: int,
     psd: bool = True,
     add_eps: float = 0,
+    early_stop_eps: float = 0,
     dtype: torch.dtype = torch.float32,
     diagnostics: bool = False,
 ) -> torch.Tensor:
@@ -53,10 +54,10 @@ def accelerated_ns_pinv(
     assert 0 < l < u, "Require 0 < l < u"
     transposed = A.shape[0] > A.shape[1]  # make the working copy fat
     if transposed: A = A.T # shape: (m≤n, n)
-    u = float(u); l = float(l)
+    u = float(u); l = float(l); add_eps = float(add_eps); early_stop_eps = float(early_stop_eps)
     scale = u + 1e-10
     A = A / scale
-    u = 1; l /= scale
+    u = 1; l /= scale; add_eps /= scale; early_stop_eps /= scale
     A = A.to(dtype)
 
     I_m = torch.eye(m, dtype=A.dtype, device=A.device)
@@ -71,7 +72,9 @@ def accelerated_ns_pinv(
         Y = (b*I_m + c * A) @ A.T
         print("In low precision, Y may still have negative eigenvalues due to numerical error :( That's could cause blowup")
         Y *= .99  # the previous line may have sent some of the middle eigenvalues to 1+epsilon
-        r = (-2 - 3*lu + 3*lu**2 + 2*lu**3)**2 / initialization_denom      
+        r = (-2 - 3*lu + 3*lu**2 + 2*lu**3)**2 / initialization_denom 
+        assert early_stop_eps < -2*b/(3*c), "the initialization is non-monotonic, so early stopping eps must be small er than the non-monotonicity"
+        early_stop_potential = (b + c * early_stop_eps) * early_stop_eps**2   
     elif psd == True:  # writing it this way to avoid confusion when psd is a string
         # Y = (2/(u + l)) * I_m
         # r = (u - l) / (u + l)
@@ -79,10 +82,12 @@ def accelerated_ns_pinv(
         denom = 1 + inv_kappa * (6 + inv_kappa)
         Y = (8 / (u * denom)) * ((1+inv_kappa)*I_m - A.T / u)
         r = (1 - inv_kappa)**2 / denom
+        early_stop_potential = (8 / (u * denom)) * ((1+inv_kappa)*early_stop_eps - (early_stop_eps**2) / u)
     elif psd == False:
         Y = (2/(u**2 + l**2)) * A.T
         r = (u**2 - l**2) / (u**2 + l**2)
         assert r - 1 < 0
+        early_stop_potential = (2/(u**2 + l**2)) * early_stop_eps**2
     else:
         raise ValueError("psd must be True, False, or 'cubic'")
 
@@ -97,12 +102,16 @@ def accelerated_ns_pinv(
         Y = Y @ (2*I_m - A @ Y) * (2 / denom)
         # Y = (2*Y - Y @ A @ Y) * (2 / denom)
         r = r**2 / denom
+        early_stop_potential = early_stop_potential * (2 - early_stop_potential) * (2 / denom)
 
         if diagnostics:
             if add_eps > 0:
                 resids.append(mp_residuals(A - add_eps*I_m, Y))  # Y @ (I_m + eps * Y @ (I_m + eps * Y))))  # Y + eps * Y^2 - eps^2 * Y^3
             else:
                 resids.append(mp_residuals(A, Y))
+
+        if abs(1 - early_stop_potential) < 1e-6:
+            break
 
     if transposed: Y = Y.T
     Y /= scale
