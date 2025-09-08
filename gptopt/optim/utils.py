@@ -154,7 +154,6 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'use_bf16': opt_config.get('use_bf16', False),
                   'use_fp64': opt_config.get('use_fp64', False),
                   'debug_timing': opt_config.get('debug_timing', True),
-                  'debug_timing_every': opt_config.get('debug_timing_every', 1),
                   'use_ns_pinv': use_ns_pinv,
                   'scalar': scalar,
                   'sgd_update': sgd_update,
