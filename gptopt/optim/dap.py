@@ -77,6 +77,7 @@ class LinearWithXtX(nn.Linear):
         self._dap_timing_enabled: bool = False
         self._dap_timing_sink: Optional[list] = None
         self._dap_accum_enabled: bool = False  # optimizer toggles this ON for DAP layers only
+        self._dap_xtx_override: bool = False
 
     @torch._dynamo.disable()
     @torch.no_grad()
@@ -92,6 +93,9 @@ class LinearWithXtX(nn.Linear):
         if self.training and self._dap_accum_enabled:                       # only for DAP layers
             dev = x.device if (self._dap_timing_enabled and x.is_cuda) else None
             with SimpleTimer("xtx", dev, self._dap_timing_sink, enabled=self._dap_timing_enabled):
+                if self._dap_xtx_override:
+                    self.C_accum_sum.zero_()
+                    self.C_accum_count.zero_()
                 self._accum_xtx(x)
         return y
 
@@ -153,6 +157,7 @@ class DAP(Optimizer):
         refresh_precond_iters=None,
         accelerated: bool = False,
         spectral_norm_estimator: str = "power_method",  # "power_method", "frobenius"
+        xtx_last_only: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -241,6 +246,7 @@ class DAP(Optimizer):
         # Debug timing controls
         self.debug_timing = debug_timing
         self._debug_step_idx = 0
+        self.xtx_last_only = xtx_last_only
         # Accumulator for average relative Frobenius change of C_ema per step
         self._C_ema_rel_change_accum = 0.0
 
@@ -307,6 +313,7 @@ class DAP(Optimizer):
                 mod._dap_timing_enabled = bool(self.debug_timing)
                 mod._dap_timing_sink    = self._pending_timing_events
                 mod._dap_accum_enabled  = True            # <- enable XtX accumulation
+                mod._dap_xtx_override = self.xtx_last_only
                 param_to_module[mod.weight] = mod
 
         if len(param_to_module) != len(dap_params):
@@ -316,62 +323,62 @@ class DAP(Optimizer):
         return param_to_module
 
 
-    def _register_input_hooks(self, model: nn.Module, dap_params):
-        """Attach hooks **only** to modules whose weights are in dap_params."""
-        # Build a fast identity‐based lookup for which weights to hook
-        dap_param_ids = {id(p) for p in dap_params}
+    # def _register_input_hooks(self, model: nn.Module, dap_params):
+    #     """Attach hooks **only** to modules whose weights are in dap_params."""
+    #     # Build a fast identity‐based lookup for which weights to hook
+    #     dap_param_ids = {id(p) for p in dap_params}
 
-        # Map each parameter object to its owning nn.Linear module
-        param_to_module = {}
-        for module in model.modules():
-            if isinstance(module, nn.Linear):
-                if id(module.weight) in dap_param_ids:
-                    param_to_module[module.weight] = module
+    #     # Map each parameter object to its owning nn.Linear module
+    #     param_to_module = {}
+    #     for module in model.modules():
+    #         if isinstance(module, nn.Linear):
+    #             if id(module.weight) in dap_param_ids:
+    #                 param_to_module[module.weight] = module
 
-        # Sanity check: ensure every dap_param got assigned
-        unclaimed = [p for p in dap_params if p not in param_to_module]
-        if unclaimed:
-            raise ValueError(
-                f"Some DAP params not owned by any Linear module: {unclaimed}"
-            )
+    #     # Sanity check: ensure every dap_param got assigned
+    #     unclaimed = [p for p in dap_params if p not in param_to_module]
+    #     if unclaimed:
+    #         raise ValueError(
+    #             f"Some DAP params not owned by any Linear module: {unclaimed}"
+    #         )
 
-        # Attach one forward‐hook per relevant module to capture XᵀX in state[p]["C"]
-        seen = set()
-        for p_ref, module in param_to_module.items():
-            if id(p_ref) in seen:
-                continue
-            seen.add(id(p_ref))
+    #     # Attach one forward‐hook per relevant module to capture XᵀX in state[p]["C"]
+    #     seen = set()
+    #     for p_ref, module in param_to_module.items():
+    #         if id(p_ref) in seen:
+    #             continue
+    #         seen.add(id(p_ref))
 
-            def make_hook(p_ref):
-                def hook(mod, inp, out):
-                    # Skip accumulation and timing during eval (validation/inference)
-                    if not mod.training:
-                        return
-                    # Time the XtX computation as it is the dominant cost during accumulation
-                    dev = p_ref.device if (self.debug_timing and p_ref.is_cuda) else None
-                    with SimpleTimer("xtx", dev, self._pending_timing_events, enabled=self.debug_timing) as timer:
-                        X = inp[0].detach()
-                        X_flat = X.flatten(0, -2)
-                        state = self.state[p_ref]
+    #         def make_hook(p_ref):
+    #             def hook(mod, inp, out):
+    #                 # Skip accumulation and timing during eval (validation/inference)
+    #                 if not mod.training:
+    #                     return
+    #                 # Time the XtX computation as it is the dominant cost during accumulation
+    #                 dev = p_ref.device if (self.debug_timing and p_ref.is_cuda) else None
+    #                 with SimpleTimer("xtx", dev, self._pending_timing_events, enabled=self.debug_timing) as timer:
+    #                     X = inp[0].detach()
+    #                     X_flat = X.flatten(0, -2)
+    #                     state = self.state[p_ref]
 
-                        if "C_accum_sum" not in state:
-                            d_in = X_flat.shape[-1]
-                            state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
-                            state["C_accum_count"] = 0
+    #                     if "C_accum_sum" not in state:
+    #                         d_in = X_flat.shape[-1]
+    #                         state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
+    #                         state["C_accum_count"] = 0
 
-                        state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
+    #                     state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
 
-                    self._XtX_update_time_accum += timer.seconds
-                    if self.debug_timing:
-                        self._XtX_update_count += 1
+    #                 self._XtX_update_time_accum += timer.seconds
+    #                 if self.debug_timing:
+    #                     self._XtX_update_count += 1
 
-                    state["C_accum_count"] += int(X_flat.shape[0])
+    #                 state["C_accum_count"] += int(X_flat.shape[0])
 
-                return hook
+    #             return hook
 
-            _hook = make_hook(p_ref)
-            _hook = torch._dynamo.disable()(_hook)
-            module.register_forward_hook(_hook, prepend=False)
+    #         _hook = make_hook(p_ref)
+    #         _hook = torch._dynamo.disable()(_hook)
+    #         module.register_forward_hook(_hook, prepend=False)
 
     def _estimate_spectral_norm(self, C: torch.Tensor, psd=True, return_iters=True):
         if self.spectral_norm_estimator == "power_method":

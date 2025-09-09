@@ -1,7 +1,7 @@
 # config.yaml
 optimizer_params:
   - name: dap-mom-ns-nadam-0.95-0.999
-    lr: [0.001, 0.003]
+    lr: [0.003, 0.001]
     dap_beta1: 0.95
     dap_beta2: 0.999
     momentum: 0
