@@ -3,6 +3,7 @@ from torch import nn
 from torch.optim import Optimizer
 from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, accelerated_ns_pinv, power_method
 from typing import Optional
+import torch.nn.functional as F
 
 import os
 import sys
@@ -10,9 +11,10 @@ import time
 
 class SimpleTimer:
     """
-    Context manager:
-      - On CUDA: records start/end Events and appends to `pending` for later resolution.
-      - On CPU: measures perf_counter() and exposes `elapsed` immediately.
+    Context manager that always reports timing into a shared sink:
+      • On CUDA: appends ('cuda', label, ev_start, ev_end, device) to `pending`.
+      • On CPU:  appends ('cpu',  label, elapsed_seconds) to `pending`.
+    Also exposes .seconds for direct reads (remains 0.0 for CUDA).
     """
     def __init__(self, label: str, device: Optional[torch.device], pending: list, enabled: bool = True):
         self.label = label
@@ -46,9 +48,13 @@ class SimpleTimer:
                 self._ev_end = torch.cuda.Event(enable_timing=True)
                 self._ev_end.record()
             if self.pending is not None:
-                self.pending.append((self.label, self._ev_start, self._ev_end, self.device))
+                # ('cuda', label, start_event, end_event, device)
+                self.pending.append(("cuda", self.label, self._ev_start, self._ev_end, self.device))
         else:
             self.elapsed = time.perf_counter() - self._t0
+            if self.pending is not None:
+                # ('cpu', label, seconds)
+                self.pending.append(("cpu", self.label, float(self.elapsed)))
         return False
 
     @property
@@ -56,6 +62,64 @@ class SimpleTimer:
         # Returns CPU elapsed seconds; 0.0 for CUDA or when disabled
         return float(self.elapsed) if (self.enabled and self.elapsed is not None) else 0.0
 
+
+class LinearWithXtX(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, *, track_xtx=False):
+        super().__init__(in_features, out_features, bias=bias)
+        # We default to track_xtx=False; the optimizer will enable it only for DAP layers.
+        self.track_xtx = bool(track_xtx)
+
+        # fp32 accumulators (same device as module)
+        self.register_buffer("C_accum_sum", torch.zeros(in_features, in_features, dtype=torch.float32))
+        self.register_buffer("C_accum_count", torch.zeros((), dtype=torch.int64))
+
+        # wired by the optimizer
+        self._dap_timing_enabled: bool = False
+        self._dap_timing_sink: Optional[list] = None
+        self._dap_accum_enabled: bool = False  # optimizer toggles this ON for DAP layers only
+
+    @torch._dynamo.disable()
+    @torch.no_grad()
+    def _accum_xtx(self, x: torch.Tensor) -> None:
+        # Completely detach from autograd; don’t let this be traced/compiled.
+        X_flat = x.detach().reshape(-1, x.shape[-1])      # [N, d]
+        C = X_flat.transpose(0, 1) @ X_flat               # [d, d] in activation dtype
+        self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
+        self.C_accum_count.add_(X_flat.shape[0])          # avoid tiny alloc of a scalar tensor
+
+    def forward(self, x):
+        y = F.linear(x, self.weight, self.bias)
+        if self.training and self._dap_accum_enabled:                       # only for DAP layers
+            dev = x.device if (self._dap_timing_enabled and x.is_cuda) else None
+            with SimpleTimer("xtx", dev, self._dap_timing_sink, enabled=self._dap_timing_enabled):
+                self._accum_xtx(x)
+        return y
+
+
+def swap_linears_for_xtx(mod: torch.nn.Module):
+    for name, child in list(mod.named_children()):
+        if isinstance(child, LinearWithXtX):
+            swap_linears_for_xtx(child)
+            continue
+
+        if isinstance(child, nn.Linear):
+            repl = LinearWithXtX(
+                child.in_features,
+                child.out_features,
+                bias=(child.bias is not None),
+                track_xtx=False,                    # <- OFF by default; optimizer will enable per DAP layer
+            ).to(device=child.weight.device)
+            repl.train(child.training)
+
+            with torch.no_grad():
+                repl.weight.data = child.weight.detach().clone()
+                if child.bias is not None:
+                    repl.bias.data = child.bias.detach().clone()
+
+            setattr(mod, name, repl)
+            swap_linears_for_xtx(repl)
+        else:
+            swap_linears_for_xtx(child)
 
 
 class DAP(Optimizer):
@@ -105,6 +169,14 @@ class DAP(Optimizer):
             moments_on_precond=moments_on_precond,
             adagradnorm=adagradnorm,
         )
+
+        if not disable_preconditioning:
+            needs_swap = any(
+                isinstance(m, nn.Linear) and not isinstance(m, LinearWithXtX)
+                for m in model.modules()
+            )
+            if needs_swap:
+                swap_linears_for_xtx(model)
 
         dap_params, dap_params_names = [], []
         adamw_params, adamw_params_names = [], []
@@ -217,8 +289,32 @@ class DAP(Optimizer):
         self.refresh_precond_iters = refresh_precond_iters
 
         # Register hooks only if we actually intend to use the covariance statistics.
+        # if not self.disable_preconditioning:
+        #     self._register_input_hooks(model, dap_params)
+
         if not self.disable_preconditioning:
-            self._register_input_hooks(model, dap_params)
+            self.param_to_module = self._wire_up_xtx_sources(model, dap_params)
+
+    def _wire_up_xtx_sources(self, model: nn.Module, dap_params):
+        dap_param_ids = {id(p) for p in dap_params}
+        param_to_module = {}
+
+        for mod in model.modules():
+            if isinstance(mod, nn.Linear) and id(mod.weight) in dap_param_ids:
+                if not isinstance(mod, LinearWithXtX):
+                    raise TypeError("Buffer mode requires LinearWithXtX. Call swap_linears_for_xtx(model) first.")
+                # timing + accumulation only for DAP layers
+                mod._dap_timing_enabled = bool(self.debug_timing)
+                mod._dap_timing_sink    = self._pending_timing_events
+                mod._dap_accum_enabled  = True            # <- enable XtX accumulation
+                param_to_module[mod.weight] = mod
+
+        if len(param_to_module) != len(dap_params):
+            missing = [p for p in dap_params if p not in param_to_module]
+            raise ValueError(f"Some DAP params not owned by any LinearWithXtX: {missing}")
+
+        return param_to_module
+
 
     def _register_input_hooks(self, model: nn.Module, dap_params):
         """Attach hooks **only** to modules whose weights are in dap_params."""
@@ -255,16 +351,15 @@ class DAP(Optimizer):
                     dev = p_ref.device if (self.debug_timing and p_ref.is_cuda) else None
                     with SimpleTimer("xtx", dev, self._pending_timing_events, enabled=self.debug_timing) as timer:
                         X = inp[0].detach()
-                        X = X.to(dtype=p_ref.dtype, device=p_ref.device)
                         X_flat = X.flatten(0, -2)
                         state = self.state[p_ref]
 
-                    if "C_accum_sum" not in state:
-                        d_in = X_flat.shape[-1]
-                        state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
-                        state["C_accum_count"] = 0
+                        if "C_accum_sum" not in state:
+                            d_in = X_flat.shape[-1]
+                            state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
+                            state["C_accum_count"] = 0
 
-                    state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
+                        state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
 
                     self._XtX_update_time_accum += timer.seconds
                     if self.debug_timing:
@@ -295,10 +390,8 @@ class DAP(Optimizer):
         self, tensor: torch.Tensor, C: torch.Tensor, p: torch.Tensor, step: int
     ):
         """Precondition a gradient-like tensor using covariance C.
-        Returns (preconditioned_tensor, pm_time, pinv_time, pm_iters, ns_iters).
+        Returns (preconditioned_tensor, pm_iters, ns_iters).
         """
-        pm_time = 0.0
-        pinv_time = 0.0
         pm_iters = 0
         ns_iters = 0
 
@@ -311,9 +404,9 @@ class DAP(Optimizer):
                 sig_max, pm_iters = self._estimate_spectral_norm(
                     C_op, psd=True, return_iters=True
                 )
-            pm_time += t.seconds
             sig_max = sig_max.item()
             eps = sig_max * self.rcond
+
             with SimpleTimer("pinv", device, self._pending_timing_events, enabled=self.debug_timing) as t2:
                 if self.accelerated == "add_eps_1e-3":
                     Cinv, info = accelerated_ns_pinv(
@@ -349,9 +442,8 @@ class DAP(Optimizer):
                         return_iters=True,
                         diagnostics=False
                     )
-            pinv_time += t2.seconds
-            ns_iters = int(info.get("iterations", 0))
 
+            ns_iters = int(info.get("iterations", 0))
             if torch.isnan(Cinv).any() or torch.isinf(Cinv).any():
                 debug_dir = "debug_matrices"
                 os.makedirs(debug_dir, exist_ok=True)
@@ -379,16 +471,14 @@ class DAP(Optimizer):
                     sig_max, pm_iters = self._estimate_spectral_norm(
                         C_op, psd=True, return_iters=True
                     )
-                pm_time += t.seconds
                 u_local = v_op / sig_max
             else:
                 device = p.device if p.is_cuda else None
                 with SimpleTimer("pinv", device, self._pending_timing_events, enabled=self.debug_timing) as t:
                     pinv_mat = torch.linalg.pinv(C_op, rtol=self.rcond)
-                pinv_time += t.seconds
                 u_local = v_op @ pinv_mat
 
-        return u_local.to(p.dtype), pm_time, pinv_time, pm_iters, ns_iters
+        return u_local.to(p.dtype), pm_iters, ns_iters
 
     def _precondition_cached(
         self,
@@ -401,7 +491,7 @@ class DAP(Optimizer):
         """Wrapper over _precondition that optionally caches the result for a number of steps.
         If self.refresh_precond_iters is None, always recomputes.
         When caching, stores results under state[p][f"precond_cache_{cache_key}"] and associated step.
-        Returns (u, pm_time, pinv_time, pm_iters, ns_iters), where timing/iters are zero if reused from cache.
+        Returns (u, pm_iters, ns_iters), where timing/iters are zero if reused from cache.
         """
         refresh = self.refresh_precond_iters
         if refresh is None:
@@ -414,16 +504,16 @@ class DAP(Optimizer):
         should_recompute = (last_step is None) or ((step - last_step) >= refresh)
 
         if should_recompute:
-            u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition(
+            u, pm_iters, ns_iters = self._precondition(
                 tensor, C, p, step
             )
             # store a cloned tensor to avoid unexpected in-place mutations
             state[cache_val_key] = u.clone()
             state[cache_step_key] = step
-            return u, pm_time, pinv_time, pm_iters, ns_iters
+            return u, pm_iters, ns_iters
         else:
             u = state[cache_val_key]
-            return u, 0.0, 0.0, 0, 0
+            return u, 0, 0
 
     def _apply_first_moment(
         self,
@@ -491,10 +581,9 @@ class DAP(Optimizer):
                 loss = closure()
 
         if self.debug_timing:
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             optimizer_step_t0 = time.perf_counter()
-            total_power_method_time = 0.0
-            total_pseudo_inverse_time = 0.0
             total_power_method_iters = 0
             total_ns_iters = 0
             num_dap_params = 0
@@ -518,35 +607,33 @@ class DAP(Optimizer):
 
             # Before applying updates, finalize accumulated covariance per parameter if present
             if not self.disable_preconditioning:
-                for p in group["params"]:
-                    state = self.state[p]
-                    C_sum = state.pop("C_accum_sum", None)
-                    count = state.pop("C_accum_count", 0)
-                    if C_sum is None or count <= 0:
+                for p, mod in self.param_to_module.items():
+                    count = mod.C_accum_count.item()
+                    if not count:
                         continue
 
-                    C_prev = state.get("C_ema", None)
-                    if self.debug_timing and C_prev is not None:
-                        new_est_f = C_sum.float().mul(1.0 / count)
-                        prev_f = C_prev.float()
-                        diff_f = new_est_f - prev_f
-                        rel = (1.0 - self.ema_beta) * (
-                            diff_f.norm("fro") / prev_f.norm("fro").clamp_min(1e-12)
-                        )
-                        self._C_ema_rel_change_accum += rel.item()
-                        self._C_ema_update_count += 1
+                    C_sum = mod.C_accum_sum
+                    C_mean = C_sum / count 
 
-                    if self.ema_beta == 0.0:
-                        C_sum.mul_(1.0 / count)
-                        state["C_ema"] = C_sum
+                    state = self.state[p]
+                    C_prev = state.get("C_ema", None)
+
+                    if self.debug_timing and C_prev is not None:
+                        diff = C_mean - C_prev
+                        rel  = (1.0 - self.ema_beta) * (diff.norm("fro") / C_prev.norm("fro").clamp_min(1e-12))
+                        self._C_ema_rel_change_accum += rel.item()
+                        self._C_ema_update_count     += 1
+
+                    if C_prev is None or self.ema_beta == 0.0:
+                        state["C_ema"] = C_mean.clone()
                     else:
-                        # in-place EMA on the existing C_ema tensor
-                        C_prev.mul_(self.ema_beta).add_(C_sum, alpha=(1.0 - self.ema_beta) / count)
+                        C_prev.mul_(self.ema_beta).add_(C_mean, alpha=(1.0 - self.ema_beta))
+
+                    mod.C_accum_sum.zero_()
+                    mod.C_accum_count.zero_()
 
             # apply weight updates
             for i, p in enumerate(params):
-
-                # sanity check
                 g = p.grad
                 if g is None:
                     continue
@@ -578,16 +665,14 @@ class DAP(Optimizer):
                 if moments_on_precond:
                     # Precondition raw gradient if available; otherwise identity
                     if C_eff is not None:
-                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                        u_pre, pm_iters, ns_iters = self._precondition_cached(
                             g, C_eff, p, step, cache_key="grad"
                         )
                         if self.debug_timing:
-                            total_power_method_time += pm_time
-                            total_pseudo_inverse_time += pinv_time
                             total_power_method_iters += pm_iters
                             total_ns_iters += ns_iters
                     else:
-                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = g, 0.0, 0.0, 0, 0
+                        u_pre, pm_iters, ns_iters = g, 0, 0
 
                     m_t = self._apply_first_moment(
                         u_pre,
@@ -625,16 +710,14 @@ class DAP(Optimizer):
                         num_grad = m_t
 
                     if C_eff is not None:
-                        u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                        u, pm_iters, ns_iters = self._precondition_cached(
                             num_grad, C_eff, p, step, cache_key="numgrad"
                         )
                         if self.debug_timing:
-                            total_power_method_time += pm_time
-                            total_pseudo_inverse_time += pinv_time
                             total_power_method_iters += pm_iters
                             total_ns_iters += ns_iters
                     else:
-                        u, pm_time, pinv_time, pm_iters, ns_iters = num_grad, 0.0, 0.0, 0, 0
+                        u, pm_iters, ns_iters = num_grad, 0, 0
 
                     second_moment_src = u
 
@@ -708,59 +791,71 @@ class DAP(Optimizer):
                 p.data.add_(g, alpha=-lr / scale)
 
         if self.debug_timing:
-            # Synchronize per-device if we recorded CUDA events
+            # If we recorded any CUDA events, sync the relevant devices
             if self._pending_timing_events:
-                devices_to_sync = set(
-                    dev
-                    for (_, _, _, dev) in self._pending_timing_events
-                    if dev is not None
-                )
+                devices_to_sync = {
+                    rec[4] for rec in self._pending_timing_events
+                    if rec[0] == "cuda" and rec[4] is not None
+                }
                 for dev in devices_to_sync:
                     torch.cuda.synchronize(dev)
-                power_time_add = 0.0
-                pinv_time_add = 0.0
-                xtx_time_add = 0.0
-                for label, ev_start, ev_end, dev in self._pending_timing_events:
+
+            power_time_add = 0.0
+            pinv_time_add  = 0.0
+            xtx_time_add   = 0.0
+            xtx_updates    = 0
+
+            # Drain all timing records (both CUDA-event and CPU-wall-clock)
+            for rec in self._pending_timing_events:
+                kind = rec[0]
+                if kind == "cuda":
+                    _, label, ev_start, ev_end, _dev = rec
                     try:
                         ms = ev_start.elapsed_time(ev_end)
                     except Exception:
                         ms = 0.0
+                    sec = ms / 1000.0
+                else:  # "cpu": ('cpu', label, seconds)
+                    _, label, sec = rec
 
-                    if label == "power":
-                        power_time_add += ms / 1000.0
-                    elif label == "pinv":
-                        pinv_time_add += ms / 1000.0
-                    elif label == "xtx":
-                        xtx_time_add += ms / 1000.0
+                if label == "power":
+                    power_time_add += sec
+                elif label == "pinv":
+                    pinv_time_add += sec
+                elif label == "xtx":
+                    xtx_time_add += sec
+                    xtx_updates  += 1
 
-                total_power_method_time += power_time_add
-                total_pseudo_inverse_time += pinv_time_add
-                self._XtX_update_time_accum += xtx_time_add
-                self._pending_timing_events.clear()
+            self._pending_timing_events.clear()
+
+            # Roll into step accumulators used by the printout
+            self._XtX_update_time_accum += xtx_time_add
+            self._XtX_update_count      += xtx_updates
+
+            total_power_method_time     = power_time_add
+            total_pseudo_inverse_time   = pinv_time_add
 
             optimizer_step_elapsed = time.perf_counter() - optimizer_step_t0
 
-            if self.debug_timing:
-                avg_C_ema_rel_change = self._C_ema_rel_change_accum / max(
-                    num_dap_params, 1
-                )
-                xtx_time = self._XtX_update_time_accum
-                xtx_updates = self._XtX_update_count
+            avg_C_ema_rel_change = self._C_ema_rel_change_accum / max(self._num_dap_params_total, 1)
+            dap_total = self._XtX_update_time_accum + total_power_method_time + total_pseudo_inverse_time
 
-                print(
-                    f"[DAP] step={self._debug_step_idx} "
-                    f"XtX={xtx_time:.4f}s/{xtx_updates}upds "
-                    f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
-                    f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
-                    f"Crel={avg_C_ema_rel_change:.6f} "
-                    f"total={optimizer_step_elapsed:.4f}s"
-                )
+            print(
+                f"[DAP] step={self._debug_step_idx} "
+                f"XtX={self._XtX_update_time_accum:.4f}s/{self._XtX_update_count}upds "
+                f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
+                f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
+                f"Crel={avg_C_ema_rel_change:.6f} "
+                f"opt_step={optimizer_step_elapsed:.4f}s "
+                f"dap_total={dap_total:.4f}s"
+            )
 
             self._debug_step_idx += 1
 
-            # Reset accumulators for next step
+            # reset per-step accumulators
             self._C_ema_rel_change_accum = 0.0
-            self._XtX_update_time_accum = 0.0
-            self._XtX_update_count = 0
+            self._XtX_update_time_accum  = 0.0
+            self._XtX_update_count       = 0
+
 
         return loss
