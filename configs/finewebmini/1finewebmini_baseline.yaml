@@ -7,7 +7,7 @@ optimizer_params:
     dap_beta2: 0.999
     momentum: 0
     wd: 0
-    sgd_update: True
+    disable_preconditioning: True
     nesterov: True
 
 training_params:

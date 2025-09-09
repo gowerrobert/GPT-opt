@@ -5,7 +5,7 @@ optimizer_params:
     lr_schedule: constant
     momentum: 0.95
     wd: 0
-    sgd_update: True
+    disable_preconditioning: True
     scalar: False
 
 training_params:

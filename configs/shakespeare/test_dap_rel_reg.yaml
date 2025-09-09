@@ -6,7 +6,7 @@ optimizer_params:
     ema_beta: 0
     momentum: 0.95
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     damping: 0.1
 
@@ -16,7 +16,7 @@ optimizer_params:
     ema_beta: 0
     momentum: 0.95
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     damping: 0.1
     ns_pinv_steps: 50

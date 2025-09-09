@@ -7,7 +7,7 @@ optimizer_params:
     dap_beta2: 0.999
     momentum: 0.95
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     ns_pinv_steps: 50
     damping: 0
@@ -23,7 +23,7 @@ optimizer_params:
     dap_beta2: 0
     momentum: 0
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     ns_pinv_steps: 50
     damping: 0
