@@ -74,7 +74,7 @@ class DAP(Optimizer):
         dap_eps: float = 1e-8,
         adamw_betas=(0.95, 0.95),
         adamw_eps=1e-8,
-        sgd_update: bool = False,
+        disable_preconditioning: bool = False,
         scalar: bool = False,
         include_output: bool = False,
         include_embed: bool = False,
@@ -138,6 +138,11 @@ class DAP(Optimizer):
             print(f"  - {name}")
         print(f"==============================================\n")
 
+        # One-time params debug print at initialization
+        self._num_dap_params_total = len(dap_params)
+        if debug_timing:
+            print(f"[DAP] params={self._num_dap_params_total}")
+
         params = list(dap_params)
         params.extend(adamw_params)
         super().__init__(params, defaults)
@@ -154,7 +159,7 @@ class DAP(Optimizer):
 
         self.ema_beta = ema_beta
         # Whether to bypass the expensive preconditioner and use a plain SGD update.
-        self.sgd_update = sgd_update
+        self.disable_preconditioning = disable_preconditioning
         self.scalar = scalar
         self.include_output = include_output
         self.include_embed = include_embed
@@ -201,8 +206,8 @@ class DAP(Optimizer):
             self.op_dtype = torch.float32
 
         assert not (
-            self.scalar and self.sgd_update
-        ), "choose either scalar or sgd update"
+            self.scalar and self.disable_preconditioning
+        ), "choose either scalar or disable_preconditioning"
 
         # Control how often to refresh preconditioned vector; None disables caching
         if refresh_precond_iters is not None:
@@ -212,7 +217,7 @@ class DAP(Optimizer):
         self.refresh_precond_iters = refresh_precond_iters
 
         # Register hooks only if we actually intend to use the covariance statistics.
-        if not self.sgd_update:
+        if not self.disable_preconditioning:
             self._register_input_hooks(model, dap_params)
 
     def _register_input_hooks(self, model: nn.Module, dap_params):
@@ -511,35 +516,31 @@ class DAP(Optimizer):
             params = [p for p in group["params"] if self.state[p]["use_dap"]]
 
             # Before applying updates, finalize accumulated covariance per parameter if present
-            if not self.sgd_update:
+            if not self.disable_preconditioning:
                 for p in group["params"]:
                     state = self.state[p]
-                    C_sum = state.get("C_accum_sum", None)
-                    count = state.get("C_accum_count", 0)
-                    if C_sum is not None and count > 0:
-                        C_new = C_sum / float(count)
+                    C_sum = state.pop("C_accum_sum", None)
+                    count = state.pop("C_accum_count", 0)
+                    if C_sum is None or count <= 0:
+                        continue
 
-                        # --- BEGIN simple C_ema update (no timing) ---
-                        C_prev = state.get("C_ema", None)
-                        if C_prev is None or self.ema_beta == 0.0:
-                            state["C_ema"] = C_new.detach()
-                        else:
-                            state["C_ema"].mul_(self.ema_beta).add_(
-                                C_new, alpha=1.0 - self.ema_beta
-                            )
-                        # track relative change only for debug reporting
-                        if self.debug_timing and C_prev is not None:
-                            diff_f = (C_new - C_prev).float()
-                            num_f = diff_f.norm(p="fro")
-                            denom = C_prev.float().norm(p="fro").clamp_min(1e-12)
-                            rel_change = (1.0 - self.ema_beta) * (num_f / denom)
-                            self._C_ema_rel_change_accum += float(rel_change.item())
-                            self._C_ema_update_count += 1
-                        # --- END simple C_ema update ---
+                    C_prev = state.get("C_ema", None)
+                    if self.debug_timing and C_prev is not None:
+                        new_est_f = C_sum.float().mul(1.0 / count)
+                        prev_f = C_prev.float()
+                        diff_f = new_est_f - prev_f
+                        rel = (1.0 - self.ema_beta) * (
+                            diff_f.norm("fro") / prev_f.norm("fro").clamp_min(1e-12)
+                        )
+                        self._C_ema_rel_change_accum += rel.item()
+                        self._C_ema_update_count += 1
 
-                        # Clear accumulators for next step
-                        del state["C_accum_sum"]
-                        del state["C_accum_count"]
+                    if self.ema_beta == 0.0:
+                        C_sum.mul_(1.0 / count)
+                        state["C_ema"] = C_sum
+                    else:
+                        # in-place EMA on the existing C_ema tensor
+                        C_prev.mul_(self.ema_beta).add_(C_sum, alpha=(1.0 - self.ema_beta) / count)
 
             # apply weight updates
             for i, p in enumerate(params):
@@ -560,102 +561,81 @@ class DAP(Optimizer):
 
                 use_nadam = group["nesterov"] and dap_beta1 > 0.0
 
-                if self.sgd_update:
-                    # Plain (momentum) SGD: moments on raw gradient only
-                    u = self._apply_first_moment(
-                        g, state, momentum, group["nesterov"], dap_beta1, prefix=""
-                    )
-                    second_moment_src = u
-                else:
-                    # Build covariance (with optional damping)
-                    C = state.get("C_ema", None)
-                    if C is None:
-                        # Not yet available: skip preconditioning this step
-                        m_t = self._apply_first_moment(
-                            g, state, momentum, group["nesterov"], dap_beta1, prefix=""
-                        )
-                        if use_nadam:
-                            u = self._nadam_numerator(m_t, g, dap_beta1, step)
-                        elif dap_beta1 > 0.0:
-                            u = self._adam_numerator(m_t, dap_beta1, step)
-                        else:
-                            u = m_t
-                        second_moment_src = u
-                    else:
-                        # Optionally form a damped covariance without mutating C_ema in-place
+                # Determine if we can/should precondition this parameter this step
+                C_eff = None
+                if not self.disable_preconditioning:
+                    C_cur = state.get("C_ema", None)
+                    if C_cur is not None:
                         if damping:
-                            trace_C = torch.trace(C)
-                            damp_val = damping * trace_C / C.shape[0]
-                            I = torch.eye(C.shape[0], dtype=C.dtype, device=C.device)
-                            C_eff = C + I * damp_val
+                            trace_C = torch.trace(C_cur)
+                            damp_val = damping * trace_C / C_cur.shape[0]
+                            I = torch.eye(C_cur.shape[0], dtype=C_cur.dtype, device=C_cur.device)
+                            C_eff = C_cur + I * damp_val
                         else:
-                            C_eff = C
+                            C_eff = C_cur
 
-                        # TODO: on iterations where we do not need to compute new preconditioner, we should skip power_method
+                if moments_on_precond:
+                    # Precondition raw gradient if available; otherwise identity
+                    if C_eff is not None:
+                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                            g, C_eff, p, step, cache_key="grad"
+                        )
+                        if self.debug_timing:
+                            total_power_method_time += pm_time
+                            total_pseudo_inverse_time += pinv_time
+                            total_power_method_iters += pm_iters
+                            total_ns_iters += ns_iters
+                    else:
+                        u_pre, pm_time, pinv_time, pm_iters, ns_iters = g, 0.0, 0.0, 0, 0
 
-                        # Preconditioning will be invoked via _precondition directly and timing aggregated inline
-                        if moments_on_precond:
-                            # First precondition the raw gradient, then apply first moment on preconditioned
-                            u_pre, pm_time, pinv_time, pm_iters, ns_iters = (
-                                self._precondition_cached(
-                                    g, C_eff, p, step, cache_key="grad"
-                                )
-                            )
-                            if self.debug_timing:
-                                total_power_method_time += pm_time
-                                total_pseudo_inverse_time += pinv_time
-                                total_power_method_iters += pm_iters
-                                total_ns_iters += ns_iters
+                    m_t = self._apply_first_moment(
+                        u_pre,
+                        state,
+                        momentum,
+                        group["nesterov"],
+                        dap_beta1,
+                        prefix="_pre",
+                    )
+                    # Numerator in preconditioned space (bias-corrected)
+                    num = (
+                        self._nadam_numerator(m_t, u_pre, dap_beta1, step)
+                        if use_nadam
+                        else self._adam_numerator(m_t, dap_beta1, step)
+                    )
 
-                            m_t = self._apply_first_moment(
-                                u_pre,
-                                state,
-                                momentum,
-                                group["nesterov"],
-                                dap_beta1,
-                                prefix="_pre",
-                            )
-                            # Numerator in preconditioned space (bias-corrected)
-                            num = (
-                                self._nadam_numerator(m_t, u_pre, dap_beta1, step)
-                                if use_nadam
-                                else self._adam_numerator(m_t, dap_beta1, step)
-                            )
+                    u = num
+                    second_moment_src = u_pre
+                else:
+                    # First compute momentum/EMA on raw gradient, then (optionally) precondition
+                    m_t = self._apply_first_moment(
+                        g,
+                        state,
+                        momentum,
+                        group["nesterov"],
+                        dap_beta1,
+                        prefix="",
+                    )
 
-                            u = num
-                            second_moment_src = u_pre
-                        else:
-                            # First compute momentum/EMA on raw gradient, then precondition
-                            m_t = self._apply_first_moment(
-                                g,
-                                state,
-                                momentum,
-                                group["nesterov"],
-                                dap_beta1,
-                                prefix="",
-                            )
+                    if use_nadam:
+                        num_grad = self._nadam_numerator(m_t, g, dap_beta1, step)
+                    elif dap_beta1 > 0.0:
+                        num_grad = self._adam_numerator(m_t, dap_beta1, step)
+                    else:
+                        num_grad = m_t
 
-                            if use_nadam:
-                                num_grad = self._nadam_numerator(
-                                    m_t, g, dap_beta1, step
-                                )
-                            elif dap_beta1 > 0.0:
-                                num_grad = self._adam_numerator(m_t, dap_beta1, step)
-                            else:
-                                num_grad = m_t
+                    if C_eff is not None:
+                        u, pm_time, pinv_time, pm_iters, ns_iters = self._precondition_cached(
+                            num_grad, C_eff, p, step, cache_key="numgrad"
+                        )
+                        if self.debug_timing:
+                            total_power_method_time += pm_time
+                            total_pseudo_inverse_time += pinv_time
+                            total_power_method_iters += pm_iters
+                            total_ns_iters += ns_iters
+                    else:
+                        u, pm_time, pinv_time, pm_iters, ns_iters = num_grad, 0.0, 0.0, 0, 0
 
-                            u, pm_time, pinv_time, pm_iters, ns_iters = (
-                                self._precondition_cached(
-                                    num_grad, C_eff, p, step, cache_key="numgrad"
-                                )
-                            )
-                            if self.debug_timing:
-                                total_power_method_time += pm_time
-                                total_pseudo_inverse_time += pinv_time
-                                total_power_method_iters += pm_iters
-                                total_ns_iters += ns_iters
-
-                            second_moment_src = u
+                    second_moment_src = u
 
                 if self.debug_timing:
                     num_dap_params += 1
@@ -771,7 +751,6 @@ class DAP(Optimizer):
                     f"XtX={xtx_time:.4f}s/{xtx_updates}upds "
                     f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
                     f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
-                    f"params={num_dap_params} "
                     f"Crel={avg_C_ema_rel_change:.6f} "
                     f"total={optimizer_step_elapsed:.4f}s"
                 )

@@ -133,7 +133,6 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         
     elif 'dap' in name:
         opt_obj = DAP
-        sgd_update = opt_config.get('sgd_update', False) or 'sgd' in name
         scalar = opt_config.get('scalar', False) or 'scalar' in name
         include_output = opt_config.get('include_output', False) or 'output' in name
         include_embed = opt_config.get('include_embed', False) or 'embed' in name
@@ -156,7 +155,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'debug_timing': opt_config.get('debug_timing', True),
                   'use_ns_pinv': use_ns_pinv,
                   'scalar': scalar,
-                  'sgd_update': sgd_update,
+                  'disable_preconditioning': opt_config.get('disable_preconditioning', False),
                   'include_output': include_output,
                   'include_embed': include_embed,
                   'moments_on_precond': opt_config.get('moments_on_precond', False),

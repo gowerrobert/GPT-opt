@@ -6,7 +6,7 @@ optimizer_params:
     dap_beta1: 0.95
     dap_beta2: 0
     momentum: 0
-    sgd_update: True
+    disable_preconditioning: True
     nesterov: False
     lr_schedule: constant
 

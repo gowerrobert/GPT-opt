@@ -6,7 +6,7 @@ optimizer_params:
     ema_beta: 0.0
     momentum: 0.95
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     rcond: 1e-8
 

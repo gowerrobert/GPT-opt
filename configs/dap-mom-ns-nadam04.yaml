@@ -1,12 +1,12 @@
 # config.yaml
 optimizer_params:
   - name: dap-mom-ns-nadam-0.95-0.999
-    lr: [0.00001]
+    lr: [0.001]
     dap_beta1: 0.95
     dap_beta2: 0.999
     momentum: 0
     wd: 0
-    sgd_update: False
+    disable_preconditioning: False
     scalar: False
     ns_pinv_steps: 50
     damping: 0
