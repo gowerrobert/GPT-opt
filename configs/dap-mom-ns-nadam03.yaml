@@ -1,7 +1,7 @@
 # config.yaml
 optimizer_params:
   - name: dap-mom-ns-nadam-0.95-0.999
-    lr: [0.0003]
+    lr: [0.00001, 0.00003]
     dap_beta1: 0.95
     dap_beta2: 0.999
     momentum: 0
@@ -15,12 +15,13 @@ optimizer_params:
     lr_schedule: constant-linear
     warm_up_fraction: 0.4
     adagradnorm: False
+    accelerated: add_eps_1e-3
     rcond: 1e-3
 
 training_params:
   tokens_processed: 524288 # 2^19
   val_tokens_processed: 8388608 #2^23
-  batch_size: 16
+  batch_size: 32
   num_epochs: 1
   context_length: 1024
   gradnorm: 1.0
