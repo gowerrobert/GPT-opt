@@ -23,12 +23,106 @@ def mp_residuals(A: torch.Tensor, X: torch.Tensor) -> dict[str, float]:
     err_proj_AX = rel_err(AX, AX @ AX)
     err_proj_XA = rel_err(XA, XA @ XA)
 
-    return {
+    metrics = {
         "AXA": err_AXA,
         "XAX": err_XAX,
         "AX_proj": err_proj_AX,
         "XA_proj": err_proj_XA,
+        # if A is low rank, this might not converge:
+        "AX": rel_err(AX, torch.eye(AX.shape[0], device=AX.device, dtype=AX.dtype)),
     }
+    if X.shape[0] == X.shape[1]:
+        metrics = metrics | {"sym": rel_err(X, X.T),}
+    return metrics
+
+
+@torch.no_grad()
+def accelerated_ns_pinv(
+    A: torch.Tensor,
+    l,  # should this be 0-dimensional torch.Tensors?
+    u,
+    max_steps: int,
+    psd: bool = True,
+    add_eps: float = 0,
+    early_stop_eps: float = 0,
+    dtype: torch.dtype = None,
+    diagnostics: bool = False,
+    return_iters: bool = False,
+) -> torch.Tensor:
+
+    assert A.ndim == 2, "2-D input only"
+    m, n = A.shape
+    assert 0 < l < u, "Require 0 < l < u"
+    transposed = A.shape[0] > A.shape[1]  # make the working copy fat
+    if transposed: A = A.T # shape: (m≤n, n)
+    u = float(u); l = float(l); add_eps = float(add_eps); early_stop_eps = float(early_stop_eps)
+    scale = u + 1e-10
+    A = A / scale
+    u = 1; l /= scale; add_eps /= scale; early_stop_eps /= scale
+    if dtype: A = A.to(dtype)
+
+    I_m = torch.eye(m, dtype=A.dtype, device=A.device)
+    assert add_eps == 0 or m == n, "add_eps only makes sense for symmetric"
+    if add_eps > 0: A += add_eps * I_m
+
+    if psd == "cubic":
+        lu = l / u
+        initialization_denom = 4 + lu*(1+lu)*(12+lu*(1+lu)*(39+4*lu*(1+lu)))
+        b = 54 * (1+lu)**2 * (1+lu+lu**2) / initialization_denom
+        c = - 54 * (1+lu)**3 / initialization_denom
+        Y = (b*I_m + c * A) @ A.T
+        print("In low precision, Y may still have negative eigenvalues due to numerical error :( That's could cause blowup")
+        Y *= .99  # the previous line may have sent some of the middle eigenvalues to 1+epsilon
+        r = (-2 - 3*lu + 3*lu**2 + 2*lu**3)**2 / initialization_denom 
+        assert early_stop_eps < -2*b/(3*c), "the initialization is non-monotonic, so early stopping eps must be small er than the non-monotonicity"
+        early_stop_potential = (b + c * early_stop_eps) * early_stop_eps**2   
+    elif psd == True:  # writing it this way to avoid confusion when psd is a string
+        # Y = (2/(u + l)) * I_m
+        # r = (u - l) / (u + l)
+        inv_kappa = l / u
+        denom = 1 + inv_kappa * (6 + inv_kappa)
+        Y = (8 / (u * denom)) * ((1+inv_kappa)*I_m - A.T / u)
+        r = (1 - inv_kappa)**2 / denom
+        early_stop_potential = (8 / (u * denom)) * ((1+inv_kappa)*early_stop_eps - (early_stop_eps**2) / u)
+    elif psd == False:
+        Y = (2/(u**2 + l**2)) * A.T
+        r = (u**2 - l**2) / (u**2 + l**2)
+        assert r - 1 < 0
+        early_stop_potential = (2/(u**2 + l**2)) * early_stop_eps**2
+    else:
+        raise ValueError("psd must be True, False, or 'cubic'")
+
+    if diagnostics:
+        if add_eps > 0:
+            resids = [mp_residuals(A - add_eps*I_m, Y)]
+        else:
+            resids = [mp_residuals(A, Y)]
+
+    for step in range(max_steps):
+        denom = 2 - r**2
+        Y = Y @ (2*I_m - A @ Y) * (2 / denom)
+        # Y = (2*Y - Y @ A @ Y) * (2 / denom)
+        r = r**2 / denom
+        early_stop_potential = early_stop_potential * (2 - early_stop_potential) * (2 / denom)
+
+        if diagnostics:
+            if add_eps > 0:
+                resids.append(mp_residuals(A - add_eps*I_m, Y))  # Y @ (I_m + eps * Y @ (I_m + eps * Y))))  # Y + eps * Y^2 - eps^2 * Y^3
+            else:
+                resids.append(mp_residuals(A, Y))
+
+        if abs(1 - early_stop_potential) < 1e-6:
+            break
+
+    if transposed: Y = Y.T
+    Y /= scale
+
+    if diagnostics:
+        return Y, {"residuals": resids}
+    elif return_iters:
+        return Y, {"iterations": step}
+    else:
+        return Y
 
 
 @torch.no_grad()
@@ -56,8 +150,8 @@ def ns_pinv_v2(
     I_n = torch.eye(n, dtype=A.dtype, device=A.device)
 
     # Safe start scale α0 = 1 / (||A||_1 ||A||_∞)
-    n1 = torch.linalg.norm(A, ord=1).item()
-    ninf = torch.linalg.norm(A, ord=float("inf")).item()
+    n1 = torch.linalg.norm(A, ord=1).item()  # max(sum(abs(x), dim=0))
+    ninf = torch.linalg.norm(A, ord=float("inf")).item()  # max(sum(abs(x), dim=1))
     alpha0 = 1.0 / max(n1 * ninf, 1e-30)
 
     if verbose:
@@ -110,9 +204,10 @@ def ns_pinv_v2(
                         "iterations": k + 1,
                         "stopped_at_crossing": stopped_at_crossing,
                     }
-                if return_iters:
+                elif return_iters:
                     return X, {"iterations": k + 1}
-                return X  # return X_v
+                else:
+                    return X  # return X_v
             next_i += 1
 
         if diagnostics:
@@ -273,6 +368,7 @@ def power_method(
         if psd:
             w = A @ v
         else:
+            # TODO: depending on the number of iters, we might want to assemble A.T @ A once
             w = A.T @ (A @ v)
         w_norm = w.norm()
         if w_norm == 0:

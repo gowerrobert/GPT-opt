@@ -161,6 +161,8 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'moments_on_precond': opt_config.get('moments_on_precond', False),
                   'adagradnorm': opt_config.get('adagradnorm', False),
                   'refresh_precond_iters': opt_config.get('refresh_precond_iters', None),
+                  'accelerated': opt_config.get('accelerated', False),
+                  'spectral_norm_estimator': opt_config.get('spectral_norm_estimator', "power_method"),
                   }
 
     elif 'muon' in name:
