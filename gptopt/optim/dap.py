@@ -136,6 +136,11 @@ class DAP(Optimizer):
             print(f"  - {name}")
         print(f"==============================================\n")
 
+        # One-time params debug print at initialization
+        self._num_dap_params_total = len(dap_params)
+        if debug_timing:
+            print(f"[DAP] params={self._num_dap_params_total}")
+
         params = list(dap_params)
         params.extend(adamw_params)
         super().__init__(params, defaults)
@@ -467,32 +472,28 @@ class DAP(Optimizer):
             if not self.disable_preconditioning:
                 for p in group["params"]:
                     state = self.state[p]
-                    C_sum = state.get("C_accum_sum", None)
-                    count = state.get("C_accum_count", 0)
-                    if C_sum is not None and count > 0:
-                        C_new = C_sum / float(count)
+                    C_sum = state.pop("C_accum_sum", None)
+                    count = state.pop("C_accum_count", 0)
+                    if C_sum is None or count <= 0:
+                        continue
 
-                        # --- BEGIN simple C_ema update (no timing) ---
-                        C_prev = state.get("C_ema", None)
-                        if C_prev is None or self.ema_beta == 0.0:
-                            state["C_ema"] = C_new.detach()
-                        else:
-                            state["C_ema"].mul_(self.ema_beta).add_(
-                                C_new, alpha=1.0 - self.ema_beta
-                            )
-                        # track relative change only for debug reporting
-                        if self.debug_timing and C_prev is not None:
-                            diff_f = (C_new - C_prev).float()
-                            num_f = diff_f.norm(p="fro")
-                            denom = C_prev.float().norm(p="fro").clamp_min(1e-12)
-                            rel_change = (1.0 - self.ema_beta) * (num_f / denom)
-                            self._C_ema_rel_change_accum += float(rel_change.item())
-                            self._C_ema_update_count += 1
-                        # --- END simple C_ema update ---
+                    C_prev = state.get("C_ema", None)
+                    if self.debug_timing and C_prev is not None:
+                        new_est_f = C_sum.float().mul(1.0 / count)
+                        prev_f = C_prev.float()
+                        diff_f = new_est_f - prev_f
+                        rel = (1.0 - self.ema_beta) * (
+                            diff_f.norm("fro") / prev_f.norm("fro").clamp_min(1e-12)
+                        )
+                        self._C_ema_rel_change_accum += rel.item()
+                        self._C_ema_update_count += 1
 
-                        # Clear accumulators for next step
-                        del state["C_accum_sum"]
-                        del state["C_accum_count"]
+                    if self.ema_beta == 0.0:
+                        C_sum.mul_(1.0 / count)
+                        state["C_ema"] = C_sum
+                    else:
+                        # in-place EMA on the existing C_ema tensor
+                        C_prev.mul_(self.ema_beta).add_(C_sum, alpha=(1.0 - self.ema_beta) / count)
 
             # apply weight updates
             for i, p in enumerate(params):
@@ -703,7 +704,6 @@ class DAP(Optimizer):
                     f"XtX={xtx_time:.4f}s/{xtx_updates}upds "
                     f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
                     f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
-                    f"params={num_dap_params} "
                     f"Crel={avg_C_ema_rel_change:.6f} "
                     f"total={optimizer_step_elapsed:.4f}s"
                 )
