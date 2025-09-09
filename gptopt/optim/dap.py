@@ -249,20 +249,21 @@ class DAP(Optimizer):
                     with SimpleTimer("xtx", dev, self._pending_timing_events, enabled=self.debug_timing) as timer:
                         X = inp[0].detach()
                         X = X.to(dtype=p_ref.dtype, device=p_ref.device)
-                        X_flat = X.reshape(-1, X.shape[-1]).contiguous()
-                        XtX = X_flat.transpose(0, 1) @ X_flat
+                        X_flat = X.flatten(0, -2)
+                        state = self.state[p_ref]
+
+                    if "C_accum_sum" not in state:
+                        d_in = X_flat.shape[-1]
+                        state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
+                        state["C_accum_count"] = 0
+
+                    state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
+
                     self._XtX_update_time_accum += timer.seconds
                     if self.debug_timing:
                         self._XtX_update_count += 1
-                    state = self.state[p_ref]
 
-                    # Accumulate XtX and sample count across micro-batches; finalize in step().
-                    if "C_accum_sum" not in state:
-                        state["C_accum_sum"] = XtX
-                        state["C_accum_count"] = int(X_flat.shape[0])
-                    else:
-                        state["C_accum_sum"].add_(XtX)
-                        state["C_accum_count"] += int(X_flat.shape[0])
+                    state["C_accum_count"] += int(X_flat.shape[0])
 
                 return hook
 
