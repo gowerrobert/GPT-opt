@@ -38,6 +38,7 @@ class DAP(Optimizer):
         adagradnorm: bool = False,
         refresh_precond_iters=None,
         accelerated: bool = False,
+        spectral_norm_estimator: str = "power_method",  # "power_method", "frobenius"
     ):
         defaults = dict(
             lr=lr,
@@ -123,6 +124,9 @@ class DAP(Optimizer):
         self.fp64 = bool(use_fp64)
 
         self.accelerated = accelerated
+        if spectral_norm_estimator not in ["power_method", "frobenius"]:
+            raise ValueError(f"Invalid spectral_norm_estimator: {spectral_norm_estimator}")
+        self.spectral_norm_estimator = spectral_norm_estimator
 
         if self.bf16 and self.fp64:
             raise ValueError("use_bf16 and use_fp64 are mutually exclusive")
@@ -201,9 +205,13 @@ class DAP(Optimizer):
 
         if self.use_ns_pinv:
             if self.debug_timing:
-                torch.cuda.synchronize()
                 t_power_start = time.perf_counter()
-            sig_max, pm_iters = torch.linalg.norm(C_op, ord='fro'), 0
+            if self.spectral_norm_estimator == "power_method":
+                sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+            elif self.spectral_norm_estimator == "frobenius":
+                sig_max, pm_iters = torch.linalg.norm(C_op, ord='fro'), 0
+            else:
+                raise ValueError(f"Invalid spectral_norm_estimator: {self.spectral_norm_estimator}")
             sig_max = sig_max.item()
             eps = sig_max * self.rcond
             if self.debug_timing:
@@ -262,7 +270,12 @@ class DAP(Optimizer):
                 if self.debug_timing:
                     torch.cuda.synchronize()
                     t_power_start = time.perf_counter()
-                sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+                if self.spectral_norm_estimator == "power_method":
+                    sig_max, pm_iters = power_method(C_op, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+                elif self.spectral_norm_estimator == "frobenius":
+                    sig_max, pm_iters = torch.linalg.norm(C_op, ord='fro'), 0
+                else:
+                    raise ValueError(f"Invalid spectral_norm_estimator: {self.spectral_norm_estimator}")
                 u_local = v_op / sig_max
                 if self.debug_timing:
                     torch.cuda.synchronize()
