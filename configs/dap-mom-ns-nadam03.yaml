@@ -1,6 +1,6 @@
 # config.yaml
 optimizer_params:
-  - name: PSD-ACCEL-dap-mom-ns-nadam-0.95-0.999
+  - name: PSD-ACCEL-dap-ns-nadam-0.95-0.999-f0.25
     lr: [0.00003, 0.00001]
     dap_beta1: 0.95
     dap_beta2: 0.999
@@ -17,6 +17,7 @@ optimizer_params:
     adagradnorm: False
     accelerated: add_eps_1e-3
     rcond: 1e-3
+    xtx_subsample: 0.25
 
 training_params:
   tokens_processed: 524288 # 2^19

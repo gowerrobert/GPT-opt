@@ -2,65 +2,15 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, accelerated_ns_pinv, power_method
+from gptopt.optim.timing import SimpleTimer
+from gptopt.optim.sampling import SystematicRowSampler
+
 from typing import Optional
 import torch.nn.functional as F
 
 import os
 import sys
 import time
-
-class SimpleTimer:
-    """
-    Context manager that always reports timing into a shared sink:
-      • On CUDA: appends ('cuda', label, ev_start, ev_end, device) to `pending`.
-      • On CPU:  appends ('cpu',  label, elapsed_seconds) to `pending`.
-    Also exposes .seconds for direct reads (remains 0.0 for CUDA).
-    """
-    def __init__(self, label: str, device: Optional[torch.device], pending: list, enabled: bool = True):
-        self.label = label
-        self.enabled = bool(enabled)
-        # If disabled, force device to None so we do no work
-        self.device = (device if (device is not None and getattr(device, "type", None) == "cuda") else None) if self.enabled else None
-        self.pending = pending
-        self.elapsed = None
-        self._t0 = None
-        self._ev_start = None
-        self._ev_end = None
-
-    @torch._dynamo.disable()
-    def __enter__(self):
-        if not self.enabled:
-            return self
-        if self.device is not None:
-            with torch.cuda.device(self.device):
-                self._ev_start = torch.cuda.Event(enable_timing=True)
-                self._ev_start.record()
-        else:
-            self._t0 = time.perf_counter()
-        return self
-
-    @torch._dynamo.disable()
-    def __exit__(self, exc_type, exc, tb):
-        if not self.enabled:
-            return False
-        if self.device is not None:
-            with torch.cuda.device(self.device):
-                self._ev_end = torch.cuda.Event(enable_timing=True)
-                self._ev_end.record()
-            if self.pending is not None:
-                # ('cuda', label, start_event, end_event, device)
-                self.pending.append(("cuda", self.label, self._ev_start, self._ev_end, self.device))
-        else:
-            self.elapsed = time.perf_counter() - self._t0
-            if self.pending is not None:
-                # ('cpu', label, seconds)
-                self.pending.append(("cpu", self.label, float(self.elapsed)))
-        return False
-
-    @property
-    def seconds(self) -> float:
-        # Returns CPU elapsed seconds; 0.0 for CUDA or when disabled
-        return float(self.elapsed) if (self.enabled and self.elapsed is not None) else 0.0
 
 
 class LinearWithXtX(nn.Linear):
@@ -70,32 +20,40 @@ class LinearWithXtX(nn.Linear):
         self.track_xtx = bool(track_xtx)
 
         # fp32 accumulators (same device as module)
-        self.register_buffer("C_accum_sum", torch.zeros(in_features, in_features, dtype=torch.float32))
+        self.register_buffer(
+            "C_accum_sum", torch.zeros(in_features, in_features, dtype=torch.float32)
+        )
         self.register_buffer("C_accum_count", torch.zeros((), dtype=torch.int64))
 
         # wired by the optimizer
         self._dap_timing_enabled: bool = False
         self._dap_timing_sink: Optional[list] = None
-        self._dap_accum_enabled: bool = False  # optimizer toggles this ON for DAP layers only
+        self._dap_accum_enabled: bool = (
+            False  # optimizer toggles this ON for DAP layers only
+        )
         self._dap_xtx_override: bool = False
+        self._xtx_sampler: Optional[SystematicRowSampler] = None
 
     @torch._dynamo.disable()
     @torch.no_grad()
     def _accum_xtx(self, x: torch.Tensor) -> None:
         # Completely detach from autograd; don’t let this be traced/compiled.
-        X_flat = x.detach().reshape(-1, x.shape[-1])      # [N, d]
-        C = X_flat.transpose(0, 1) @ X_flat               # [d, d] in activation dtype
+        X = x.detach().reshape(-1, x.shape[-1])  # [N, d]
+        if self._xtx_sampler is not None:
+            idx = self._xtx_sampler.select_indices(X.shape[0], X.device)
+            if idx is not None:
+                X = X.index_select(0, idx)
+        C = X.transpose(0, 1) @ X  # [d, d] in activation dtype
         self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
-        self.C_accum_count.add_(X_flat.shape[0])          # avoid tiny alloc of a scalar tensor
+        self.C_accum_count.add_(X.shape[0])  # avoid tiny alloc of a scalar tensor
 
     def forward(self, x):
         y = F.linear(x, self.weight, self.bias)
-        if self.training and self._dap_accum_enabled:                       # only for DAP layers
+        if self.training and self._dap_accum_enabled:  # only for DAP layers
             dev = x.device if (self._dap_timing_enabled and x.is_cuda) else None
-            with SimpleTimer("xtx", dev, self._dap_timing_sink, enabled=self._dap_timing_enabled):
-                if self._dap_xtx_override:
-                    self.C_accum_sum.zero_()
-                    self.C_accum_count.zero_()
+            with SimpleTimer(
+                "xtx", dev, self._dap_timing_sink, enabled=self._dap_timing_enabled
+            ):
                 self._accum_xtx(x)
         return y
 
@@ -111,7 +69,7 @@ def swap_linears_for_xtx(mod: torch.nn.Module):
                 child.in_features,
                 child.out_features,
                 bias=(child.bias is not None),
-                track_xtx=False,                    # <- OFF by default; optimizer will enable per DAP layer
+                track_xtx=False,  # <- OFF by default; optimizer will enable per DAP layer
             ).to(device=child.weight.device)
             repl.train(child.training)
 
@@ -157,7 +115,7 @@ class DAP(Optimizer):
         refresh_precond_iters=None,
         accelerated: bool = False,
         spectral_norm_estimator: str = "power_method",  # "power_method", "frobenius"
-        xtx_last_only: bool = False,
+        xtx_subsample: Optional[float] = None,
     ):
         defaults = dict(
             lr=lr,
@@ -246,7 +204,8 @@ class DAP(Optimizer):
         # Debug timing controls
         self.debug_timing = debug_timing
         self._debug_step_idx = 0
-        self.xtx_last_only = xtx_last_only
+        self.xtx_subsample = xtx_subsample
+
         # Accumulator for average relative Frobenius change of C_ema per step
         self._C_ema_rel_change_accum = 0.0
 
@@ -269,7 +228,9 @@ class DAP(Optimizer):
 
         self.accelerated = accelerated
         if spectral_norm_estimator not in ["power_method", "frobenius"]:
-            raise ValueError(f"Invalid spectral_norm_estimator: {spectral_norm_estimator}")
+            raise ValueError(
+                f"Invalid spectral_norm_estimator: {spectral_norm_estimator}"
+            )
         self.spectral_norm_estimator = spectral_norm_estimator
 
         if self.bf16 and self.fp64:
@@ -294,10 +255,6 @@ class DAP(Optimizer):
                 refresh_precond_iters = None
         self.refresh_precond_iters = refresh_precond_iters
 
-        # Register hooks only if we actually intend to use the covariance statistics.
-        # if not self.disable_preconditioning:
-        #     self._register_input_hooks(model, dap_params)
-
         if not self.disable_preconditioning:
             self.param_to_module = self._wire_up_xtx_sources(model, dap_params)
 
@@ -308,77 +265,23 @@ class DAP(Optimizer):
         for mod in model.modules():
             if isinstance(mod, nn.Linear) and id(mod.weight) in dap_param_ids:
                 if not isinstance(mod, LinearWithXtX):
-                    raise TypeError("Buffer mode requires LinearWithXtX. Call swap_linears_for_xtx(model) first.")
+                    raise TypeError(
+                        "Buffer mode requires LinearWithXtX. Call swap_linears_for_xtx(model) first."
+                    )
                 # timing + accumulation only for DAP layers
                 mod._dap_timing_enabled = bool(self.debug_timing)
-                mod._dap_timing_sink    = self._pending_timing_events
-                mod._dap_accum_enabled  = True            # <- enable XtX accumulation
-                mod._dap_xtx_override = self.xtx_last_only
+                mod._dap_timing_sink = self._pending_timing_events
+                mod._dap_accum_enabled = True  # <- enable XtX accumulation
+                mod._xtx_sampler = SystematicRowSampler(self.xtx_subsample)
                 param_to_module[mod.weight] = mod
 
         if len(param_to_module) != len(dap_params):
             missing = [p for p in dap_params if p not in param_to_module]
-            raise ValueError(f"Some DAP params not owned by any LinearWithXtX: {missing}")
+            raise ValueError(
+                f"Some DAP params not owned by any LinearWithXtX: {missing}"
+            )
 
         return param_to_module
-
-
-    # def _register_input_hooks(self, model: nn.Module, dap_params):
-    #     """Attach hooks **only** to modules whose weights are in dap_params."""
-    #     # Build a fast identity‐based lookup for which weights to hook
-    #     dap_param_ids = {id(p) for p in dap_params}
-
-    #     # Map each parameter object to its owning nn.Linear module
-    #     param_to_module = {}
-    #     for module in model.modules():
-    #         if isinstance(module, nn.Linear):
-    #             if id(module.weight) in dap_param_ids:
-    #                 param_to_module[module.weight] = module
-
-    #     # Sanity check: ensure every dap_param got assigned
-    #     unclaimed = [p for p in dap_params if p not in param_to_module]
-    #     if unclaimed:
-    #         raise ValueError(
-    #             f"Some DAP params not owned by any Linear module: {unclaimed}"
-    #         )
-
-    #     # Attach one forward‐hook per relevant module to capture XᵀX in state[p]["C"]
-    #     seen = set()
-    #     for p_ref, module in param_to_module.items():
-    #         if id(p_ref) in seen:
-    #             continue
-    #         seen.add(id(p_ref))
-
-    #         def make_hook(p_ref):
-    #             def hook(mod, inp, out):
-    #                 # Skip accumulation and timing during eval (validation/inference)
-    #                 if not mod.training:
-    #                     return
-    #                 # Time the XtX computation as it is the dominant cost during accumulation
-    #                 dev = p_ref.device if (self.debug_timing and p_ref.is_cuda) else None
-    #                 with SimpleTimer("xtx", dev, self._pending_timing_events, enabled=self.debug_timing) as timer:
-    #                     X = inp[0].detach()
-    #                     X_flat = X.flatten(0, -2)
-    #                     state = self.state[p_ref]
-
-    #                     if "C_accum_sum" not in state:
-    #                         d_in = X_flat.shape[-1]
-    #                         state["C_accum_sum"] = torch.zeros(d_in, d_in, device=p_ref.device, dtype=p_ref.dtype)
-    #                         state["C_accum_count"] = 0
-
-    #                     state["C_accum_sum"].addmm_(X_flat.T, X_flat, beta=1.0, alpha=1.0)
-
-    #                 self._XtX_update_time_accum += timer.seconds
-    #                 if self.debug_timing:
-    #                     self._XtX_update_count += 1
-
-    #                 state["C_accum_count"] += int(X_flat.shape[0])
-
-    #             return hook
-
-    #         _hook = make_hook(p_ref)
-    #         _hook = torch._dynamo.disable()(_hook)
-    #         module.register_forward_hook(_hook, prepend=False)
 
     def _estimate_spectral_norm(self, C: torch.Tensor, psd=True, return_iters=True):
         if self.spectral_norm_estimator == "power_method":
@@ -387,11 +290,13 @@ class DAP(Optimizer):
             )
         elif self.spectral_norm_estimator == "frobenius":
             if return_iters:
-                return torch.linalg.norm(C, ord='fro'), 0
+                return torch.linalg.norm(C, ord="fro"), 0
             else:
-                return torch.linalg.norm(C, ord='fro')
+                return torch.linalg.norm(C, ord="fro")
         else:
-            raise ValueError(f"Invalid spectral_norm_estimator: {self.spectral_norm_estimator}")
+            raise ValueError(
+                f"Invalid spectral_norm_estimator: {self.spectral_norm_estimator}"
+            )
 
     def _precondition(
         self, tensor: torch.Tensor, C: torch.Tensor, p: torch.Tensor, step: int
@@ -407,19 +312,23 @@ class DAP(Optimizer):
 
         if self.use_ns_pinv:
             device = p.device if p.is_cuda else None
-            with SimpleTimer("power", device, self._pending_timing_events, enabled=self.debug_timing) as t:
+            with SimpleTimer(
+                "power", device, self._pending_timing_events, enabled=self.debug_timing
+            ):
                 sig_max, pm_iters = self._estimate_spectral_norm(
                     C_op, psd=True, return_iters=True
                 )
             sig_max = sig_max.item()
             eps = sig_max * self.rcond
 
-            with SimpleTimer("pinv", device, self._pending_timing_events, enabled=self.debug_timing) as t2:
+            with SimpleTimer(
+                "pinv", device, self._pending_timing_events, enabled=self.debug_timing
+            ):
                 if self.accelerated == "add_eps_1e-3":
                     Cinv, info = accelerated_ns_pinv(
                         C_op,
                         l=eps,
-                        u=1.2*sig_max,
+                        u=1.2 * sig_max,
                         max_steps=self.ns_pinv_steps,
                         psd=True,
                         add_eps=1e-3,  # note this is absolute, not relative to sig_max, unlike the others
@@ -427,12 +336,12 @@ class DAP(Optimizer):
                         dtype=torch.float32,
                         diagnostics=False,
                         return_iters=True,
-                    )                
+                    )
                 elif self.accelerated:
                     Cinv, info = accelerated_ns_pinv(
                         C_op,
                         l=eps,
-                        u=1.2*sig_max,
+                        u=1.2 * sig_max,
                         max_steps=self.ns_pinv_steps,
                         psd=False,  # for now
                         add_eps=0,
@@ -447,7 +356,7 @@ class DAP(Optimizer):
                         eps=eps,
                         max_steps=self.ns_pinv_steps,
                         return_iters=True,
-                        diagnostics=False
+                        diagnostics=False,
                     )
 
             ns_iters = int(info.get("iterations", 0))
@@ -474,14 +383,24 @@ class DAP(Optimizer):
         else:
             if self.scalar:
                 device = p.device if p.is_cuda else None
-                with SimpleTimer("power", device, self._pending_timing_events, enabled=self.debug_timing) as t:
+                with SimpleTimer(
+                    "power",
+                    device,
+                    self._pending_timing_events,
+                    enabled=self.debug_timing,
+                ):
                     sig_max, pm_iters = self._estimate_spectral_norm(
                         C_op, psd=True, return_iters=True
                     )
                 u_local = v_op / sig_max
             else:
                 device = p.device if p.is_cuda else None
-                with SimpleTimer("pinv", device, self._pending_timing_events, enabled=self.debug_timing) as t:
+                with SimpleTimer(
+                    "pinv",
+                    device,
+                    self._pending_timing_events,
+                    enabled=self.debug_timing,
+                ):
                     pinv_mat = torch.linalg.pinv(C_op, rtol=self.rcond)
                 u_local = v_op @ pinv_mat
 
@@ -511,9 +430,7 @@ class DAP(Optimizer):
         should_recompute = (last_step is None) or ((step - last_step) >= refresh)
 
         if should_recompute:
-            u, pm_iters, ns_iters = self._precondition(
-                tensor, C, p, step
-            )
+            u, pm_iters, ns_iters = self._precondition(tensor, C, p, step)
             # store a cloned tensor to avoid unexpected in-place mutations
             state[cache_val_key] = u.clone()
             state[cache_step_key] = step
@@ -620,24 +537,29 @@ class DAP(Optimizer):
                         continue
 
                     C_sum = mod.C_accum_sum
-                    C_mean = C_sum / count 
+                    C_mean = C_sum / count
 
                     state = self.state[p]
                     C_prev = state.get("C_ema", None)
 
                     if self.debug_timing and C_prev is not None:
                         diff = C_mean - C_prev
-                        rel  = (1.0 - self.ema_beta) * (diff.norm("fro") / C_prev.norm("fro").clamp_min(1e-12))
+                        rel = (1.0 - self.ema_beta) * (
+                            diff.norm("fro") / C_prev.norm("fro").clamp_min(1e-12)
+                        )
                         self._C_ema_rel_change_accum += rel.item()
-                        self._C_ema_update_count     += 1
+                        self._C_ema_update_count += 1
 
                     if C_prev is None or self.ema_beta == 0.0:
                         state["C_ema"] = C_mean.clone()
                     else:
-                        C_prev.mul_(self.ema_beta).add_(C_mean, alpha=(1.0 - self.ema_beta))
+                        C_prev.mul_(self.ema_beta).add_(
+                            C_mean, alpha=(1.0 - self.ema_beta)
+                        )
 
                     mod.C_accum_sum.zero_()
                     mod.C_accum_count.zero_()
+                    mod._xtx_sampler.reset()
 
             # apply weight updates
             for i, p in enumerate(params):
@@ -664,7 +586,9 @@ class DAP(Optimizer):
                         if damping:
                             trace_C = torch.trace(C_cur)
                             damp_val = damping * trace_C / C_cur.shape[0]
-                            I = torch.eye(C_cur.shape[0], dtype=C_cur.dtype, device=C_cur.device)
+                            I = torch.eye(
+                                C_cur.shape[0], dtype=C_cur.dtype, device=C_cur.device
+                            )
                             C_eff = C_cur + I * damp_val
                         else:
                             C_eff = C_cur
@@ -801,16 +725,17 @@ class DAP(Optimizer):
             # If we recorded any CUDA events, sync the relevant devices
             if self._pending_timing_events:
                 devices_to_sync = {
-                    rec[4] for rec in self._pending_timing_events
+                    rec[4]
+                    for rec in self._pending_timing_events
                     if rec[0] == "cuda" and rec[4] is not None
                 }
                 for dev in devices_to_sync:
                     torch.cuda.synchronize(dev)
 
             power_time_add = 0.0
-            pinv_time_add  = 0.0
-            xtx_time_add   = 0.0
-            xtx_updates    = 0
+            pinv_time_add = 0.0
+            xtx_time_add = 0.0
+            xtx_updates = 0
 
             # Drain all timing records (both CUDA-event and CPU-wall-clock)
             for rec in self._pending_timing_events:
@@ -831,21 +756,27 @@ class DAP(Optimizer):
                     pinv_time_add += sec
                 elif label == "xtx":
                     xtx_time_add += sec
-                    xtx_updates  += 1
+                    xtx_updates += 1
 
             self._pending_timing_events.clear()
 
             # Roll into step accumulators used by the printout
             self._XtX_update_time_accum += xtx_time_add
-            self._XtX_update_count      += xtx_updates
+            self._XtX_update_count += xtx_updates
 
-            total_power_method_time     = power_time_add
-            total_pseudo_inverse_time   = pinv_time_add
+            total_power_method_time = power_time_add
+            total_pseudo_inverse_time = pinv_time_add
 
             optimizer_step_elapsed = time.perf_counter() - optimizer_step_t0
 
-            avg_C_ema_rel_change = self._C_ema_rel_change_accum / max(self._num_dap_params_total, 1)
-            dap_total = self._XtX_update_time_accum + total_power_method_time + total_pseudo_inverse_time
+            avg_C_ema_rel_change = self._C_ema_rel_change_accum / max(
+                self._num_dap_params_total, 1
+            )
+            dap_total = (
+                self._XtX_update_time_accum
+                + total_power_method_time
+                + total_pseudo_inverse_time
+            )
 
             print(
                 f"[DAP] step={self._debug_step_idx} "
@@ -861,8 +792,7 @@ class DAP(Optimizer):
 
             # reset per-step accumulators
             self._C_ema_rel_change_accum = 0.0
-            self._XtX_update_time_accum  = 0.0
-            self._XtX_update_count       = 0
-
+            self._XtX_update_time_accum = 0.0
+            self._XtX_update_count = 0
 
         return loss

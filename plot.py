@@ -107,7 +107,7 @@ def plot_tuned_curves(outputs, colormap, outfilename, linestylemap=None, num_epo
         linestylemap = {method_name: '-' for method_name in colormap.keys()}
     
     # Create matplotlib figure and axis
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(8, 4))  # Increased width to accommodate side legend
     tuned_methods = {}
 
     # Phase 1: Find best learning rate for each method
@@ -146,9 +146,9 @@ def plot_tuned_curves(outputs, colormap, outfilename, linestylemap=None, num_epo
     upper_bound = np.max([output[field][round(0.2 * len(output[field]))] for output in tuned_outputs])
     upper_bound = min(upper_bound, 10.0) if not np.isnan(upper_bound) else 10.0
     
-    ax.legend(loc='upper right', fontsize=10)
+    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=10)
     ax.set_ylim(3.2, upper_bound)
-    fig.subplots_adjust(top=0.99, bottom=0.155, left=0.12, right=0.99)
+    fig.subplots_adjust(top=0.99, bottom=0.155, left=0.12, right=0.75)  # Adjusted right margin for legend
     
     # Phase 5: Save plot
     suffix = "_tuned"
