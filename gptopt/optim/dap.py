@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, accelerated_ns_pinv, power_method
-from gptopt.optim.timing import SimpleTimer
+from gptopt.optim.timing import SimpleTimer, install_forward_cuda_timers
 from gptopt.optim.sampling import SystematicRowSampler
 
 from typing import Optional
@@ -34,7 +34,6 @@ class LinearWithXtX(nn.Linear):
         self._dap_xtx_override: bool = False
         self._xtx_sampler: Optional[SystematicRowSampler] = None
 
-    @torch._dynamo.disable()
     @torch.no_grad()
     def _accum_xtx(self, x: torch.Tensor) -> None:
         # Completely detach from autograd; don’t let this be traced/compiled.
@@ -50,11 +49,7 @@ class LinearWithXtX(nn.Linear):
     def forward(self, x):
         y = F.linear(x, self.weight, self.bias)
         if self.training and self._dap_accum_enabled:  # only for DAP layers
-            dev = x.device if (self._dap_timing_enabled and x.is_cuda) else None
-            with SimpleTimer(
-                "xtx", dev, self._dap_timing_sink, enabled=self._dap_timing_enabled
-            ):
-                self._accum_xtx(x)
+            self._accum_xtx(x)
         return y
 
 
@@ -259,6 +254,7 @@ class DAP(Optimizer):
             self.param_to_module = self._wire_up_xtx_sources(model, dap_params)
 
     def _wire_up_xtx_sources(self, model: nn.Module, dap_params):
+        dap_modules = []
         dap_param_ids = {id(p) for p in dap_params}
         param_to_module = {}
 
@@ -274,11 +270,19 @@ class DAP(Optimizer):
                 mod._dap_accum_enabled = True  # <- enable XtX accumulation
                 mod._xtx_sampler = SystematicRowSampler(self.xtx_subsample)
                 param_to_module[mod.weight] = mod
+                dap_modules.append(mod)
 
         if len(param_to_module) != len(dap_params):
             missing = [p for p in dap_params if p not in param_to_module]
             raise ValueError(
                 f"Some DAP params not owned by any LinearWithXtX: {missing}"
+            )
+
+        if self.debug_timing and torch.cuda.is_available() and dap_modules:
+            install_forward_cuda_timers(
+                modules=dap_modules,
+                pending=self._pending_timing_events,
+                label="xtx",     # matches your existing aggregator keys
             )
 
         return param_to_module

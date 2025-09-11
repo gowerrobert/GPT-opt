@@ -17,7 +17,8 @@ optimizer_params:
     adagradnorm: False
     accelerated: add_eps_1e-3
     rcond: 1e-3
-    xtx_subsample: 0.25
+    xtx_subsample: null
+    debug_timing: False
 
 training_params:
   tokens_processed: 524288 # 2^19
