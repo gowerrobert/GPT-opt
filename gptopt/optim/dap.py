@@ -25,6 +25,10 @@ class LinearWithXtX(nn.Linear):
         )
         self.register_buffer("C_accum_count", torch.zeros((), dtype=torch.int64))
 
+        self.register_buffer(
+            "_xtx_mults_this_step", torch.tensor(0, dtype=torch.int64), persistent=False
+        )
+
         # wired by the optimizer
         self._dap_timing_enabled: bool = False
         self._dap_timing_sink: Optional[list] = None
@@ -34,17 +38,28 @@ class LinearWithXtX(nn.Linear):
         self._dap_xtx_override: bool = False
         self._xtx_sampler: Optional[SystematicRowSampler] = None
 
+
+    @torch.no_grad()
+    def _commit_xtx(self, X: torch.Tensor) -> None:
+        """Compute X^T X and update per-step accumulators and debug mults."""
+        N = X.shape[0]
+        d = X.shape[1]
+        C = X.transpose(0, 1) @ X  # [d, d] in activation dtype
+        self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
+        self.C_accum_count.add_(N)
+        self._xtx_mults_this_step.add_(N * d * d)
+
     @torch.no_grad()
     def _accum_xtx(self, x: torch.Tensor) -> None:
         # Completely detach from autograd; don’t let this be traced/compiled.
         X = x.detach().reshape(-1, x.shape[-1])  # [N, d]
+        N = X.shape[0]
+
         if self._xtx_sampler is not None:
-            idx = self._xtx_sampler.select_indices(X.shape[0], X.device)
-            if idx is not None:
-                X = X.index_select(0, idx)
-        C = X.transpose(0, 1) @ X  # [d, d] in activation dtype
-        self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
-        self.C_accum_count.add_(X.shape[0])  # avoid tiny alloc of a scalar tensor
+            idx_rows = self._xtx_sampler.select_indices(N, X.device)
+            X = X.index_select(0, idx_rows)
+
+        self._commit_xtx(X)
 
     def forward(self, x):
         y = F.linear(x, self.weight, self.bias)
@@ -244,19 +259,16 @@ class DAP(Optimizer):
         ), "choose either scalar or disable_preconditioning"
 
         # Control how often to refresh preconditioned vector; None disables caching
-        if refresh_precond_iters is not None:
-            refresh_precond_iters = int(refresh_precond_iters)
-            if refresh_precond_iters <= 0:
-                refresh_precond_iters = None
         self.refresh_precond_iters = refresh_precond_iters
 
+        self.dap_modules = []
+        self.param_to_module = {}
+
         if not self.disable_preconditioning:
-            self.param_to_module = self._wire_up_xtx_sources(model, dap_params)
+            self._wire_up_xtx_sources(model, dap_params)
 
     def _wire_up_xtx_sources(self, model: nn.Module, dap_params):
-        dap_modules = []
         dap_param_ids = {id(p) for p in dap_params}
-        param_to_module = {}
 
         for mod in model.modules():
             if isinstance(mod, nn.Linear) and id(mod.weight) in dap_param_ids:
@@ -269,23 +281,22 @@ class DAP(Optimizer):
                 mod._dap_timing_sink = self._pending_timing_events
                 mod._dap_accum_enabled = True  # <- enable XtX accumulation
                 mod._xtx_sampler = SystematicRowSampler(self.xtx_subsample)
-                param_to_module[mod.weight] = mod
-                dap_modules.append(mod)
+                mod._xtx_mults_this_step.zero_()
+                self.param_to_module[mod.weight] = mod
+                self.dap_modules.append(mod)
 
-        if len(param_to_module) != len(dap_params):
-            missing = [p for p in dap_params if p not in param_to_module]
+        if len(self.param_to_module) != len(dap_params):
+            missing = [p for p in dap_params if p not in self.param_to_module]
             raise ValueError(
                 f"Some DAP params not owned by any LinearWithXtX: {missing}"
             )
 
-        if self.debug_timing and torch.cuda.is_available() and dap_modules:
+        if self.debug_timing and torch.cuda.is_available() and self.dap_modules:
             install_forward_cuda_timers(
-                modules=dap_modules,
+                modules=self.dap_modules,
                 pending=self._pending_timing_events,
-                label="xtx",     # matches your existing aggregator keys
+                label="xtx",  # matches your existing aggregator keys
             )
-
-        return param_to_module
 
     def _estimate_spectral_norm(self, C: torch.Tensor, psd=True, return_iters=True):
         if self.spectral_norm_estimator == "power_method":
@@ -563,7 +574,6 @@ class DAP(Optimizer):
 
                     mod.C_accum_sum.zero_()
                     mod.C_accum_count.zero_()
-                    mod._xtx_sampler.reset()
 
             # apply weight updates
             for i, p in enumerate(params):
@@ -782,9 +792,13 @@ class DAP(Optimizer):
                 + total_pseudo_inverse_time
             )
 
+            xtx_mults_total = 0
+            for mod in self.dap_modules:
+                xtx_mults_total += mod._xtx_mults_this_step.item()
+
             print(
                 f"[DAP] step={self._debug_step_idx} "
-                f"XtX={self._XtX_update_time_accum:.4f}s/{self._XtX_update_count}upds "
+                f"XtX={self._XtX_update_time_accum:.4f}s/{xtx_mults_total:.2e} mults "
                 f"power={total_power_method_time:.4f}s/{total_power_method_iters}it "
                 f"pinv={total_pseudo_inverse_time:.4f}s/{total_ns_iters}it "
                 f"Crel={avg_C_ema_rel_change:.6f} "
@@ -798,5 +812,8 @@ class DAP(Optimizer):
             self._C_ema_rel_change_accum = 0.0
             self._XtX_update_time_accum = 0.0
             self._XtX_update_count = 0
+
+        for mod in self.dap_modules:
+            mod._xtx_mults_this_step.zero_()
 
         return loss

@@ -6,11 +6,12 @@ optimizer_params:
     weight_decay: 0.1
     lr_schedule: constant-linear
     warm_up_fraction: 0.4
+    fused: True
 
 training_params:
   tokens_processed: 524288 # 2^19
   val_tokens_processed: 8388608 #2^23
-  batch_size: 64
+  batch_size: 16
   num_epochs: 1
   context_length: 1024
   gradnorm: 1.0

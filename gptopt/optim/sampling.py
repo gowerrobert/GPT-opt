@@ -1,71 +1,66 @@
-# sampling.py
 from typing import Optional
-import math
 import torch
+import torch.nn as nn
 
-class SystematicRowSampler:
+class SystematicRowSampler(nn.Module):
     """
     Streaming, microbatch-invariant systematic sampler selecting ~f of rows per step,
-    implemented with integer fixed-point arithmetic (Q0.32) for exact, partition-
-    invariant decisions.
-
-    API:
-      s = SystematicRowSampler(fraction=0.25)  # None or 1.0 -> keep all rows
-      s.reset()                                  # call once per optimizer step
-      idx = s.select_indices(N, device)          # LongTensor indices in [0, N), or None for "keep all"
+    implemented with integer fixed-point arithmetic (Q0.32).
+    Always returns a LongTensor of indices (possibly empty). No None returns.
+    State is in tensor buffers so it's safe to call from compiled regions.
     """
-    __slots__ = ("num", "phase")
-
+    __slots__ = ()
     _SHIFT = 32
     _SCALE = 1 << _SHIFT
     _MASK  = _SCALE - 1
 
-    def __init__(self, fraction: Optional[float]):
-        if fraction is None:
-            # None = keep all rows
-            self.num = None
+    def __init__(self, fraction: Optional[float]) -> None:
+        super().__init__()
+        # Interpret fraction: None or >=1.0 -> keep all rows (static boolean, compile-safe)
+        if fraction is None or float(fraction) == 1.0:
+            f = None
+        elif float(fraction) > 1.0:
+            raise ValueError("fraction must be None, 1.0, or in (0, 1).")
         else:
             f = float(fraction)
-            if not (0.0 < f <= 1.0):
-                raise ValueError("fraction must be None or in (0, 1].")
-            # Use 64-bit math for exact step; ceil to avoid undercount when f*N is integer
-            step = int(math.ceil(math.ldexp(f, self._SHIFT)))  # ceil(f * 2**SHIFT)
-            # step == SCALE means f == 1.0 → treated as "keep all" in select_indices
-            self.num = step
-        self.phase = 0  # Q0.32 integer in [0, SCALE)
+            if not (0.0 < f < 1.0):
+                raise ValueError("fraction must be None or in (0, 1).")
 
-    def reset(self) -> None:
-        self.phase = 0
+        # Static flag: no Tensor.item() in compiled regions
+        self._keep_all: bool = (f is None)
+
+        # Buffers
+        self.register_buffer("phase", torch.zeros((), dtype=torch.int64), persistent=False)
+        num = 0 if f is None else int(round(f * self._SCALE))  # Q0.32 numerator
+        self.register_buffer("num", torch.tensor(num, dtype=torch.int64), persistent=False)
+        self.register_buffer("mask", torch.tensor(self._MASK, dtype=torch.int64), persistent=False)
 
     @torch.no_grad()
-    def select_indices(self, N: int, device: torch.device) -> Optional[torch.Tensor]:
+    def reset(self) -> None:
+        # Reset per-step accumulator (call once per optimizer step)
+        self.phase.zero_()
+
+    def select_indices(self, N: int, device: torch.device) -> torch.Tensor:
         """
-        Return LongTensor indices (0..N-1) to keep for this call, or None to keep all.
-        Updates internal phase so the next call continues the stream.
+        Always returns a LongTensor of indices in [0, N) (possibly empty).
+        No Python branching on runtime tensors; safe to call in compiled forward.
         """
-        if N <= 0:
-            return torch.empty(0, dtype=torch.long, device=device)
+        # Keep-all fast path – uses a Python bool constant set at __init__ (compile-safe)
+        if self._keep_all:
+            return torch.arange(N, device=device, dtype=torch.long)
 
-        # Keep all rows when not subsampling (fraction None or 1.0)
-        if self.num is None or self.num >= self._SCALE:
-            return None
+        # 1..N increments
+        i1   = torch.arange(1, N + 1, device=device, dtype=torch.int64)
+        step = self.num  # int64 tensor (Q0.32 numerator)
 
-        # Vectorized Bresenham-like "carry" test over increments i = 1..N
-        i1 = torch.arange(1, N + 1, device=device, dtype=torch.int64)  # 1..N
-        step = torch.tensor(self.num, dtype=torch.int64, device=device)
+        # Fixed-point systematic sampling
+        t1   = self.phase + step * i1
+        hi1  = t1 >> self._SHIFT
+        hi0  = (t1 - step) >> self._SHIFT
 
-        # Did we cross an integer boundary when adding 'step' this increment?
-        t1 = self.phase + step * i1
-        hi1 = t1 >> self._SHIFT
-        hi0 = (t1 - step) >> self._SHIFT
-        hits = (hi1 - hi0) == 1  # bool mask
+        # Hit detection and mapping to 0..N-1 (branch-free; works for empty too)
+        idx  = torch.nonzero((hi1 - hi0) == 1, as_tuple=False).squeeze(-1) - 1
 
-        # Map from increment index (1..N) to row index (0..N-1)
-        idx = torch.nonzero(hits, as_tuple=False).squeeze(-1)
-        if idx.numel() > 0:
-            idx = idx - 1  # select row i-1
-
-        # Advance phase for the next call (mod SCALE)
-        self.phase = int((self.phase + int(self.num) * int(N)) & self._MASK)
-
+        # Update phase: phase = (phase + step * N) & MASK
+        self.phase.copy_((self.phase + step * N) & self.mask)
         return idx
