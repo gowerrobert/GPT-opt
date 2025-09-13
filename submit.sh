@@ -11,7 +11,7 @@ sbatch <<EOF
 #SBATCH --cpus-per-gpu=8
 #SBATCH --time=60:00:00
 #SBATCH --partition=gpu
-#SBATCH --constraint=a100
+#SBATCH --constraint=a100-40gb
 #SBATCH --exclude=workergpu027
 #SBATCH -o output/slurm_logs/${CONFIG_NAME}.log
 #SBATCH -e output/slurm_logs/${CONFIG_NAME}.err

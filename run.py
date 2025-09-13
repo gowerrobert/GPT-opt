@@ -59,6 +59,7 @@ dataset_path = DATA_DIR + f"/{config['dataset']['name']}-gpt2/"
 if master_process: print(f"Load data from {dataset_path}")
 B, T = training_params['batch_size'], training_params['context_length']
 assert training_params['tokens_processed'] % (world_size * B * T) == 0 
+num_microbatches = int(training_params['tokens_processed'] / (world_size * B * T))
 train_dataloader = ShardedDataLoader(dataset_path, B, T, "train", device)
 val_dataloader = ShardedDataLoader(dataset_path, B, T, "val", device)
 total_iterations = int(training_params['num_epochs'] * len(train_dataloader) / training_params['tokens_processed'])
@@ -100,6 +101,8 @@ for opt_config in list_optimizer_params:
         p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
 
         if 'dap' in opt_name:
+            # Provide micro-batch count for DAP (matches grad_accum_steps in training loop)
+            hyperp['num_microbatches'] = num_microbatches
             optimizer = optimizer_obj(model_copy, p, **hyperp)
         else:
             optimizer = optimizer_obj(p, **hyperp)

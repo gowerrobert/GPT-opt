@@ -11,12 +11,11 @@ import os
 import sys
 import time
 
+torch._dynamo.config.recompile_limit = 64
 
 class LinearWithXtX(nn.Linear):
-    def __init__(self, in_features, out_features, bias=True, *, track_xtx=False):
+    def __init__(self, in_features, out_features, bias=True):
         super().__init__(in_features, out_features, bias=bias)
-        # We default to track_xtx=False; the optimizer will enable it only for DAP layers.
-        self.track_xtx = bool(track_xtx)
 
         # fp32 accumulators (same device as module)
         self.register_buffer(
@@ -28,23 +27,43 @@ class LinearWithXtX(nn.Linear):
             "_xtx_mults_this_step", torch.tensor(0, dtype=torch.int64), persistent=False
         )
 
+        self.register_buffer("_xtx_mb_cursor", torch.tensor(0, dtype=torch.int64), persistent=False)
+
         # wired by the optimizer
         self._dap_timing_enabled: bool = False
         self._dap_timing_sink: Optional[list] = None
-        self._dap_accum_enabled: bool = False  
+        self._dap_accum_enabled: bool = (
+            False  # optimizer toggles this ON for DAP layers only
+        )
+        self._mb_accum: bool = False
+        self._xtx_active_mbs: int = 0
         self.xtx_subsample: Optional[float] = None
+
+    @torch.no_grad()
+    def _commit_xtx(self, X: torch.Tensor) -> None:
+        """Compute X^T X and update per-step accumulators and debug mults."""
+        N = X.shape[0]
+        d = X.shape[1]
+        C = X.transpose(0, 1) @ X  # [d, d] in activation dtype
+        self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
+        self.C_accum_count.add_(N)
+        self._xtx_mults_this_step.add_(N * d * d)
 
     @torch.no_grad()
     def _accum_xtx(self, x: torch.Tensor) -> None:
         # Completely detach from autograd; don’t let this be traced/compiled.
         X = x.detach().reshape(-1, x.shape[-1])  # [N, d]
+
         if self.xtx_subsample is not None:
             k = int(self.xtx_subsample * X.shape[0])
             X = X[:k]
-        C = X.transpose(0, 1) @ X  # [d, d] in activation dtype
-        self.C_accum_sum.add_(C.to(self.C_accum_sum.dtype))
-        self.C_accum_count.add_(X.shape[0])
-        self._xtx_mults_this_step.add_(X.shape[0] * X.shape[1] * X.shape[1])
+            self._commit_xtx(X)
+            return
+
+        if not self._mb_accum:
+            return  # skip compute entirely
+
+        self._commit_xtx(X)  # whole microbatch; contiguous; no indexing
 
     def forward(self, x):
         y = F.linear(x, self.weight, self.bias)
@@ -64,7 +83,6 @@ def swap_linears_for_xtx(mod: torch.nn.Module):
                 child.in_features,
                 child.out_features,
                 bias=(child.bias is not None),
-                track_xtx=False,  # <- OFF by default; optimizer will enable per DAP layer
             ).to(device=child.weight.device)
             repl.train(child.training)
 
@@ -77,6 +95,12 @@ def swap_linears_for_xtx(mod: torch.nn.Module):
             swap_linears_for_xtx(repl)
         else:
             swap_linears_for_xtx(child)
+
+
+@torch._dynamo.disable
+def _xtx_flag_pre_hook(mod: "LinearWithXtX", _inputs) -> None:
+    mod._mb_accum = bool(mod._xtx_mb_cursor.item() < mod._xtx_active_mbs)
+    mod._xtx_mb_cursor.add_(1)
 
 class DAP(Optimizer):
     def __init__(
@@ -202,8 +226,10 @@ class DAP(Optimizer):
         self.debug_timing = debug_timing
         self._debug_step_idx = 0
         self.xtx_subsample = xtx_subsample
-        self.mb_subsampling = mb_subsampling
+
+        # Optional: number of micro-batches accumulated per optimizer step
         self.num_microbatches = num_microbatches
+        self.mb_subsampling = mb_subsampling
 
         # Accumulator for average relative Frobenius change of C_ema per step
         self._C_ema_rel_change_accum = 0.0
@@ -269,11 +295,23 @@ class DAP(Optimizer):
                 mod._dap_timing_enabled = self.debug_timing
                 mod._dap_timing_sink = self._pending_timing_events
                 mod._dap_accum_enabled = True  # <- enable XtX accumulation
-                mod._xtx_mults_this_step.zero_()
                 mod.xtx_subsample = self.xtx_subsample
+                mod._xtx_mults_this_step.zero_()
 
                 self.param_to_module[mod.weight] = mod
                 self.dap_modules.append(mod)
+
+                if self.mb_subsampling and self.xtx_subsample is not None:
+                    if self.num_microbatches is None:
+                        raise ValueError("num_microbatches must be set if mb_subsampling is True")
+
+                    active = int(self.xtx_subsample * self.num_microbatches)
+                    active = max(1, min(active, self.num_microbatches))
+
+                    mod._xtx_active_mbs = active
+                    mod._xtx_mb_cursor.zero_()
+                    mod.register_forward_pre_hook(_xtx_flag_pre_hook)
+
 
         if len(self.param_to_module) != len(dap_params):
             missing = [p for p in dap_params if p not in self.param_to_module]
@@ -805,5 +843,7 @@ class DAP(Optimizer):
 
         for mod in self.dap_modules:
             mod._xtx_mults_this_step.zero_()
+            if self.mb_subsampling:
+                mod._xtx_mb_cursor.zero_()
 
         return loss

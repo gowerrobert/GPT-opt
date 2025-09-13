@@ -28,6 +28,7 @@ class SystematicRowSampler(nn.Module):
 
         # Static flag: no Tensor.item() in compiled regions
         self._keep_all: bool = (f is None)
+        self._f = f
 
         # Buffers
         self.register_buffer("phase", torch.zeros((), dtype=torch.int64), persistent=False)
