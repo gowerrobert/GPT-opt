@@ -14,6 +14,8 @@ source gptopt/bin/activate
 python3 -m pip install -e .
 ```
 
+If using wandb, run `wandb login`.
+
 ### Run Example:
 ```bash
 python3 run.py --config configs/shakespeare.yaml

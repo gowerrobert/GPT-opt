@@ -17,5 +17,6 @@ setup(
         'accelerate',
         'tiktoken',
         'zstandard'
+        'wandb',
     ],
 )
