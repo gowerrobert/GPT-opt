@@ -15,10 +15,11 @@ import json
 import os
 import wandb
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 
-@hydra.main(version_base=None, config_path="hydra_conf", config_name="config")
+@hydra.main(version_base=None, config_path="hydra_conf")
 def main(config : DictConfig):
     set_seed(42)
 
@@ -34,8 +35,8 @@ def main(config : DictConfig):
     print(f"Using device: {device}")
 
     # Logging
-    output_dir = config['logging_params']['results_dir']
-    outputname = output_dir.split('/')[-1]
+    outputname = HydraConfig.get().job.config_name
+    output_dir = config['logging_params'].get('results_dir', f"dap_outputs/hydra-results/{outputname}")
     CKPT_DIR = config['logging_params']['ckpt_dir']
     ckpt_dir_base = CKPT_DIR + f"/{outputname}/" if CKPT_DIR != "" else ""
     if master_process:

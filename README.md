@@ -18,7 +18,7 @@ If using wandb, run `wandb login`.
 
 ### Run Example:
 ```bash
-python3 run.py --config configs/shakespeare.yaml
+python3 run.py -cn test_hydra
 ```
 
 ### Plot Results:
