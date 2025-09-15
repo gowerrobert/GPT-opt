@@ -27,5 +27,5 @@ source venv/bin/activate
 export PYTHONUNBUFFERED=1
 
 # Run the Python script with the config file
-srun -u python3 -u run.py -cn $@
+srun -u python3 -u run_hydra.py -cn $@
 EOF
