@@ -16,7 +16,8 @@ setup(
         'datasets',
         'accelerate',
         'tiktoken',
-        'zstandard'
+        'zstandard',
         'wandb',
+        'hydra-core',
     ],
 )
