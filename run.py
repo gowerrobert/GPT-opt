@@ -1,11 +1,7 @@
-import yaml
-import argparse
 import torch
-import matplotlib.pyplot as plt
 from gptopt.train_distributed import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
 from gptopt.utils import hash_config, set_seed, get_worker_info
-#from gptopt.utils import get_default_config, load_config
 from gptopt.model import load_model
 from gptopt.dataloader import DATA_DIR, ShardedDataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -41,7 +37,7 @@ def main(config : DictConfig):
     ckpt_dir_base = CKPT_DIR + f"/{outputname}/" if CKPT_DIR != "" else ""
     if master_process:
         # print(f"Loading configuration from {config_file}")
-        print(f"Training on dataset {config['dataset']['name']}")
+        print(f"Training on dataset {config['training_data']['dataset']['name']}")
         os.makedirs(output_dir, exist_ok=True)  
         if CKPT_DIR != "": os.makedirs(ckpt_dir_base, exist_ok=True)
 
@@ -49,12 +45,12 @@ def main(config : DictConfig):
     model = load_model(config['gpt_model'], device)
         
     # Set the training parameters
-    training_params = config['training_params']
+    training_params = config['training_data']['training_params']
     opt_config = config["optimizer_params"]
     torch.set_float32_matmul_precision(training_params['tensorcore_precision'])
 
     # Load data
-    dataset_path = DATA_DIR + f"/{config['dataset']['name']}-gpt2/"
+    dataset_path = DATA_DIR + f"/{config['training_data']['dataset']['name']}-gpt2/"
     if master_process: print(f"Load data from {dataset_path}")
     B, T = training_params['batch_size'], training_params['context_length']
     assert training_params['tokens_processed'] % (world_size * B * T) == 0 
