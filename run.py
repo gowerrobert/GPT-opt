@@ -49,8 +49,8 @@ def main(config : DictConfig):
     model = load_model(config['gpt_model'], device)
         
     # Set the training parameters
-    training_params = config['training_params'] 
-    list_optimizer_params = config["optimizer_params"]
+    training_params = config['training_params']
+    opt_config = config["optimizer_params"]
     torch.set_float32_matmul_precision(training_params['tensorcore_precision'])
 
     # Load data
@@ -66,76 +66,71 @@ def main(config : DictConfig):
         print(f"Length of validation dataset : {len(val_dataloader)/1e6:0.1f} million tokens")
         print(f"Total number of iterations : {total_iterations}")
 
-    # Loop over optimizers
-    for opt_config in list_optimizer_params:
-        for lr in opt_config['lr']:
-            print()
-            if master_process:
-                print(f"Training with optimizer {opt_config['name']} and learning rate {lr}")
-                
-            # Generate hash for the current optimizer configuration
-            opt_config_copy = copy.deepcopy(opt_config)
-            opt_config_copy['lr'] = lr
-            config_hash = hash_config(OmegaConf.to_container(opt_config_copy), OmegaConf.to_container(training_params), OmegaConf.to_container(config['gpt_model']))
-            file_name = f"{opt_config['name']}-lr-{lr}-{opt_config['lr_schedule']}-{config_hash}-world{world_size}"
-            output_path = os.path.join(output_dir, file_name + '.json')
-            ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
-            
-            # copy model to ensure consistency
-            model_copy = copy.deepcopy(model).to(device)
-            
-            # Setup optimizer
-            optimizer_obj, hyperp = get_optimizer(opt_config, lr=lr)
+    print()
+    if master_process:
+        print(f"Training with optimizer {opt_config['name']} and learning rate {opt_config['lr']}")
+        
+    # Generate hash for the current optimizer configuration
+    config_hash = hash_config(OmegaConf.to_container(opt_config), OmegaConf.to_container(training_params), OmegaConf.to_container(config['gpt_model']))
+    file_name = f"{opt_config['name']}-lr-{opt_config['lr']}-{opt_config['lr_schedule']}-{config_hash}-world{world_size}"
+    output_path = os.path.join(output_dir, file_name + '.json')
+    ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
+    
+    # copy model to ensure consistency
+    model_copy = copy.deepcopy(model).to(device)
+    
+    # Setup optimizer
+    optimizer_obj, hyperp = get_optimizer(opt_config, lr=opt_config['lr'])
 
-            if training_params['compile']:
-                if master_process: print("Compiling model")
-                model_copy = torch.compile(model_copy)
+    if training_params['compile']:
+        if master_process: print("Compiling model")
+        model_copy = torch.compile(model_copy)
 
-            if ddp:
-                model_copy = DDP(model_copy, device_ids=[local_rank])
-            
-            opt_name = opt_config['name']
-            p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
+    if ddp:
+        model_copy = DDP(model_copy, device_ids=[local_rank])
+    
+    opt_name = opt_config['name']
+    p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
 
-            if 'dap' in opt_name:
-                optimizer = optimizer_obj(model_copy, p, **hyperp)
-            else:
-                optimizer = optimizer_obj(p, **hyperp)
+    if 'dap' in opt_name:
+        optimizer = optimizer_obj(model_copy, p, **hyperp)
+    else:
+        optimizer = optimizer_obj(p, **hyperp)
 
-            scheduler = get_scheduler(opt_config, optimizer, total_iterations=total_iterations)
+    scheduler = get_scheduler(opt_config, optimizer, total_iterations=total_iterations)
 
-            # Initialize wandb
-            if master_process and config['logging_params'].get('wandb', None) is not None:
-                config_no_optimizer = copy.deepcopy(config)
-                del config_no_optimizer['optimizer_params']
-                wandb_config = dict(one_optimizer_params=opt_config_copy, **config_no_optimizer, world_size=world_size)
-                if "dir" not in config['logging_params']['wandb']:
-                    config['logging_params']['wandb']['dir'] = f"{config['logging_params']['results_dir']}/../wandb"
-                wandb_run = wandb.init(
-                    **config['logging_params']['wandb'],
-                    config=wandb_config,
-                    reinit='create_new',
-                )
-            else:
-                wandb_run = None
+    # Initialize wandb
+    if master_process and config['logging_params'].get('wandb', None) is not None:
+        config_no_optimizer = copy.deepcopy(config)
+        del config_no_optimizer['optimizer_params']
+        wandb_config = dict(one_optimizer_params=opt_config, **config_no_optimizer, world_size=world_size)
+        if "dir" not in config['logging_params']['wandb']:
+            config['logging_params']['wandb']['dir'] = f"{config['logging_params']['results_dir']}/../wandb"
+        wandb_run = wandb.init(
+            **config['logging_params']['wandb'],
+            config=wandb_config,
+            reinit='create_new',
+        )
+    else:
+        wandb_run = None
 
-            # Train
-            try:
-                logger = train(train_dataloader, val_dataloader, model_copy, optimizer, training_params,
-                            scheduler=scheduler, ckpt_dir=ckpt_dir,
-                            logging_params=config['logging_params'], wandb_run=wandb_run)
-            finally:
-                if master_process and wandb_run is not None:
-                    wandb_run.finish()
+    # Train
+    try:
+        logger = train(train_dataloader, val_dataloader, model_copy, optimizer, training_params,
+                    scheduler=scheduler, ckpt_dir=ckpt_dir,
+                    logging_params=config['logging_params'], wandb_run=wandb_run)
+    finally:
+        if master_process and wandb_run is not None:
+            wandb_run.finish()
 
-            # Save
-            if master_process:
-                logger.name = opt_config['name'] + '-lr-' + str(lr)
-                if os.path.exists(output_path):
-                    print(f"File {output_path} already exists. Overwriting")
-                with open(output_path, 'w') as file:
-                    json.dump(logger.__dict__, file)
-                print(f"Saved output to {output_path}")
+    # Save
+    if master_process:
+        logger.name = opt_config['name'] + '-lr-' + str(opt_config['lr'])
+        if os.path.exists(output_path):
+            print(f"File {output_path} already exists. Overwriting")
+        with open(output_path, 'w') as file:
+            json.dump(logger.__dict__, file)
+        print(f"Saved output to {output_path}")
 
     if ddp:
         dist.destroy_process_group()
