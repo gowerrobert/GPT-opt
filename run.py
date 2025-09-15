@@ -14,9 +14,12 @@ import copy
 import json
 import os
 import wandb
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 
-def main(args):
+@hydra.main(version_base=None, config_path="hydra_conf", config_name="config")
+def main(config : DictConfig):
     set_seed(42)
 
     # First set up DDP
@@ -30,20 +33,16 @@ def main(args):
     device_type = "cuda" if device.startswith("cuda") else "cpu"
     print(f"Using device: {device}")
 
-    # Parse config
-    config_file = args.config
-    with open(config_file, 'r') as file:
-        config = yaml.safe_load(file)
-    #config = load_config(get_default_config(), config_file)
-    outputname = config_file.replace("configs/","").replace('.yaml','')
-    output_dir = f"gptopt/outputs/{outputname}"
+    # Logging
+    output_dir = config['logging_params']['results_dir']
+    outputname = output_dir.split('/')[-1]
     CKPT_DIR = config['logging_params']['ckpt_dir']
     ckpt_dir_base = CKPT_DIR + f"/{outputname}/" if CKPT_DIR != "" else ""
     if master_process:
-        print(f"Loading configuration from {config_file}")
+        # print(f"Loading configuration from {config_file}")
         print(f"Training on dataset {config['dataset']['name']}")
         os.makedirs(output_dir, exist_ok=True)  
-        if CKPT_DIR != "": os.makedirs(ckpt_dir_base, exist_ok=True)  
+        if CKPT_DIR != "": os.makedirs(ckpt_dir_base, exist_ok=True)
 
     # Load model
     model = load_model(config['gpt_model'], device)
@@ -76,9 +75,8 @@ def main(args):
             # Generate hash for the current optimizer configuration
             opt_config_copy = copy.deepcopy(opt_config)
             opt_config_copy['lr'] = lr
-            config_hash = hash_config(opt_config_copy, training_params, config['gpt_model'])
+            config_hash = hash_config(OmegaConf.to_container(opt_config_copy), OmegaConf.to_container(training_params), OmegaConf.to_container(config['gpt_model']))
             file_name = f"{opt_config['name']}-lr-{lr}-{opt_config['lr_schedule']}-{config_hash}-world{world_size}"
-            if args.suffix != '': file_name += f"-{args.suffix}"
             output_path = os.path.join(output_dir, file_name + '.json')
             ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
             
@@ -111,7 +109,7 @@ def main(args):
                 del config_no_optimizer['optimizer_params']
                 wandb_config = dict(one_optimizer_params=opt_config_copy, **config_no_optimizer, world_size=world_size)
                 if "dir" not in config['logging_params']['wandb']:
-                    config['logging_params']['wandb']['dir'] = f"{config['logging_params']['ckpt_dir']}/../wandb"
+                    config['logging_params']['wandb']['dir'] = f"{config['logging_params']['results_dir']}/../wandb"
                 wandb_run = wandb.init(
                     **config['logging_params']['wandb'],
                     config=wandb_config,
@@ -143,8 +141,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train GPT-2 with optional config file.')
-    parser.add_argument('--config', type=str, help='Path to config file', default=None)
-    parser.add_argument('--suffix', type=str, help='Path to config file', default='')
-    args = parser.parse_args()
-    main(args)
+    main()
