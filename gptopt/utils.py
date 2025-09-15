@@ -7,6 +7,11 @@ import json
 import torch.distributed as dist
 import os
 
+def set_xtx_mode(mod: torch.nn.Module, xtx_mode: bool):
+    for m in mod.modules():
+        if hasattr(m, "xtx_mode"):
+            setattr(m, "xtx_mode", xtx_mode)
+
 # get worker info for distributed training
 def get_worker_info():
     if dist.is_initialized():

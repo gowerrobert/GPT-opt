@@ -34,6 +34,8 @@ class LinearWithXtX(nn.Linear):
         self._dap_accum_enabled: bool = False  
         self.xtx_subsample: Optional[float] = None
 
+        self.xtx_mode: bool = True
+
     @torch.no_grad()
     def _accum_xtx(self, x: torch.Tensor) -> None:
         # Completely detach from autograd; don’t let this be traced/compiled.
@@ -48,10 +50,9 @@ class LinearWithXtX(nn.Linear):
 
     def forward(self, x):
         y = F.linear(x, self.weight, self.bias)
-        if self.training and self._dap_accum_enabled:  # only for DAP layers
+        if self.training and self._dap_accum_enabled and self.xtx_mode:  # only for DAP layers
             self._accum_xtx(x)
         return y
-
 
 def swap_linears_for_xtx(mod: torch.nn.Module):
     for name, child in list(mod.named_children()):

@@ -60,6 +60,7 @@ if master_process: print(f"Load data from {dataset_path}")
 B, T = training_params['batch_size'], training_params['context_length']
 assert training_params['tokens_processed'] % (world_size * B * T) == 0 
 num_microbatches = int(training_params['tokens_processed'] / (world_size * B * T))
+
 train_dataloader = ShardedDataLoader(dataset_path, B, T, "train", device)
 val_dataloader = ShardedDataLoader(dataset_path, B, T, "val", device)
 total_iterations = int(training_params['num_epochs'] * len(train_dataloader) / training_params['tokens_processed'])
@@ -90,9 +91,23 @@ for opt_config in list_optimizer_params:
         # Setup optimizer
         optimizer_obj, hyperp = get_optimizer(opt_config, lr=lr)
 
+        compiled_fast = None
+        compiled_xtx = None
+
+        if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', 0) > 0:
+            xtx_rate = opt_config['xtx_subsample']
+            training_params['mb_subsampling'] = xtx_rate
+
+            if num_microbatches < 1 / xtx_rate:
+                opt_config['xtx_subsample'] = num_microbatches * xtx_rate
+            else:
+                opt_config['xtx_subsample'] = None
+        else:
+            training_params['mb_subsampling'] = None
+
         if training_params['compile']:
-            if master_process: print("Compiling model")
-            model_copy = torch.compile(model_copy)
+                if master_process: print("Compiling model")
+                model_copy = torch.compile(model_copy)
 
         if ddp:
             model_copy = DDP(model_copy, device_ids=[local_rank])

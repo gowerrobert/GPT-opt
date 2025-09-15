@@ -18,7 +18,7 @@ optimizer_params:
     accelerated: add_eps_1e-3
     rcond: 1e-3
     xtx_subsample: 0.25
-    mb_subsampling: False
+    mb_subsampling: True
     debug_timing: False
 
 training_params:

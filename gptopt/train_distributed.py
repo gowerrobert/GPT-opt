@@ -2,7 +2,7 @@ import torch
 import time 
 import contextlib
 import torch.distributed as dist
-from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
+from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint, set_xtx_mode
 import json
 
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
@@ -65,6 +65,13 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                                                         optimizer, train_dataloader, scheduler=None)
     if ckpt_dir == "":
         print("Will not save checkpoints as no directory is specified")
+
+    do_mb_subsampling = training_params['mb_subsampling'] is not None
+    if do_mb_subsampling:
+        xtx_rate = training_params['mb_subsampling']
+        stride = min(max(1, int(round(1.0 / xtx_rate))), grad_accum_steps)
+        base_model = model.module if hasattr(model, "module") else model
+        if master_process: print(f"Microbatch subsampling rate: {xtx_rate}, stride: {stride}")
     
     # Training loop
     for epoch in range(training_params['num_epochs']):
@@ -79,10 +86,15 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         optimizer.zero_grad()
         if step != 1: print(train_dataloader.get_state())
         
-        for batch in train_dataloader:            
+        for batch in train_dataloader:
+            if do_mb_subsampling:
+                do_xtx = ((step - 1) % stride) == 0
+                set_xtx_mode(base_model, do_xtx)
+                        
             with autocast_ctxt:
                 loss = model(batch[0], batch[1], return_logits=False)[1]
                 loss /= grad_accum_steps
+
             loss_accum += loss.detach()
                 
             # Check if accummulated enough gradients to take a step
