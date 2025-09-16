@@ -1,8 +1,8 @@
 optimizer_params:
-  name: PSD-ACCEL-dap-ns-nadam-0.95-0.999-f0.25
+  name: dap-ns-nadam
   lr: 0.0003
   dap_beta1: 0.95
-  dap_beta2: 0.999
+  dap_beta2: 0.9999
   momentum: 0
   weight_decay: 0
   disable_preconditioning: False
@@ -15,6 +15,6 @@ optimizer_params:
   adagradnorm: False
   accelerated: add_eps_1e-3
   rcond: 1e-3
-  xtx_subsample: 0.25
+  xtx_subsample: null
   mb_subsampling: True
   debug_timing: False

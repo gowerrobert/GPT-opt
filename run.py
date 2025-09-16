@@ -92,7 +92,7 @@ for opt_config in list_optimizer_params:
         # Setup optimizer
         optimizer_obj, hyperp = get_optimizer(opt_config, lr=lr)
 
-        if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', 0) > 0:
+        if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', None):
             xtx_rate = opt_config['xtx_subsample']
             training_params['mb_subsampling'] = xtx_rate
 

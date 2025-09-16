@@ -6,3 +6,4 @@ logging_params:
   load_ckpt_step: 0
   keep_last: 2
   ckpt_dir: ""
+  results_dir: "dap_outputs/hydra-results/my_experiment"
