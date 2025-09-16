@@ -1,1 +1,0 @@
-run_name: lr-${optimizer.optimizer_params.lr}-wd-${optimizer.optimizer_params.weight_decay}

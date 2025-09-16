@@ -14,6 +14,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+OmegaConf.register_new_resolver("div", lambda x, y: x // y)
 
 @hydra.main(version_base=None, config_path="hydra_conf", config_name="config")
 def main(config : DictConfig):

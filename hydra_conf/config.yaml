@@ -5,5 +5,5 @@ defaults:
   - optimizer: adamw
   - logging: default
   - hydra: default
-  - paths: lr-wd-sweep
+  - paths: batch-lr-wd-sweep
   - _self_
