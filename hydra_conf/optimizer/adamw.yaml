@@ -2,6 +2,6 @@ optimizer_params:
   name: adamw
   lr: 0.001
   betas: [0.95, 0.95]
-  weight_decay: 0.1
+  weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4

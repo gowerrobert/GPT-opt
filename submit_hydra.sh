@@ -3,6 +3,9 @@
 SCRIPT=$1
 SCRIPT_NAME=$(basename "$SCRIPT")
 
+# Remove the script path from the positional parameters so only user args remain (e.g., lr, wd)
+shift
+
 mkdir -p output/slurm_logs
 
 sbatch <<EOF
@@ -28,5 +31,5 @@ source venv/bin/activate
 export PYTHONUNBUFFERED=1
 
 # Run the Python script with the config file
-srun -u bash $SCRIPT
+srun -u bash "$SCRIPT" "$@"
 EOF

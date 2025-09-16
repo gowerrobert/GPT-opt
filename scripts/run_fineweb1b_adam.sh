@@ -5,6 +5,6 @@ wd=${2:-0.0}
 
 python run_hydra.py \
     optimizer=adamw \
-    data=fineweb1b \
+    data=fineweb1B \
     optimizer.optimizer_params.lr=$lr \
     optimizer.optimizer_params.weight_decay=$wd

@@ -4,6 +4,7 @@ venv/
 output/
 outputs/
 logs/
+slurm_logs/
 .vscode/
 gptopt.egg-info/
 __pycache__/
