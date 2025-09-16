@@ -2,7 +2,7 @@
 optimizer_params:
   - name: dap-sgd-output-embed
     lr: [0.00003, 0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3]
-    wd: 0
+    weight_decay: 0
     lr_schedule: constant
     disable_preconditioning: True
     include_output: True

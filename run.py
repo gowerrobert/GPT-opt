@@ -92,9 +92,6 @@ for opt_config in list_optimizer_params:
         # Setup optimizer
         optimizer_obj, hyperp = get_optimizer(opt_config, lr=lr)
 
-        compiled_fast = None
-        compiled_xtx = None
-
         if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', 0) > 0:
             xtx_rate = opt_config['xtx_subsample']
             training_params['mb_subsampling'] = xtx_rate
@@ -107,8 +104,8 @@ for opt_config in list_optimizer_params:
             training_params['mb_subsampling'] = None
 
         if training_params['compile']:
-                if master_process: print("Compiling model")
-                model_copy = torch.compile(model_copy)
+            if master_process: print("Compiling model")
+            model_copy = torch.compile(model_copy)
 
         if ddp:
             model_copy = DDP(model_copy, device_ids=[local_rank])

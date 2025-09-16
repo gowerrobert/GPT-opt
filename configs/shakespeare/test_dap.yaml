@@ -5,7 +5,7 @@ optimizer_params:
     lr_schedule: constant
     ema_beta: 0
     momentum: 0
-    wd: 0
+    weight_decay: 0
     disable_preconditioning: True
     scalar: False
 
@@ -14,7 +14,7 @@ optimizer_params:
     lr_schedule: constant
     ema_beta: 0
     momentum: 0
-    wd: 0
+    weight_decay: 0
     disable_preconditioning: False
     scalar: True
 
@@ -23,7 +23,7 @@ optimizer_params:
     lr_schedule: constant
     ema_beta: 0
     momentum: 0
-    wd: 0
+    weight_decay: 0
     disable_preconditioning: False
     scalar: False
 

@@ -138,7 +138,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         include_embed = opt_config.get('include_embed', False) or 'embed' in name
         use_ns_pinv = opt_config.get('use_ns_pinv', False) or 'ns' in name
         hyperp = {'lr': lr,
-                  'wd': opt_config.get('wd', 0.1),
+                  'wd': opt_config.get('weight_decay', 0.1),
                   'momentum': opt_config.get('momentum', 0.95),
                   'nesterov': opt_config.get('nesterov', False),
                   'damping': opt_config.get('damping', 0.0),

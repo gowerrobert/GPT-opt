@@ -1,0 +1,9 @@
+defaults:
+  - model: gpt-small
+  - training: fineweb1B
+  - data: fineweb1B
+  - optimizer: adamw
+  - logging: default
+  - hydra: default
+  - paths: lr-wd-sweep
+  - _self_

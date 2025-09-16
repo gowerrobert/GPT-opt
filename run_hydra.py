@@ -15,9 +15,13 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 
-@hydra.main(version_base=None, config_path="hydra_conf")
+@hydra.main(version_base=None, config_path="hydra_conf", config_name="config")
 def main(config : DictConfig):
     set_seed(42)
+
+    # Establish Hydra run directory for saving outputs
+    hydra_run_dir = HydraConfig.get().runtime.output_dir
+    os.makedirs(hydra_run_dir, exist_ok=True)
 
     # First set up DDP
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -30,30 +34,37 @@ def main(config : DictConfig):
     device_type = "cuda" if device.startswith("cuda") else "cpu"
     print(f"Using device: {device}")
 
+    # Set the training parameters
+    training_params = config['training']['training_params']
+    opt_config = config["optimizer"]["optimizer_params"]
+    logging_config = config["logging"]["logging_params"]
+    model_config = config["model"]["config"]
+
     # Logging
     outputname = HydraConfig.get().job.config_name
-    output_dir = config['logging_params'].get('results_dir', f"dap_outputs/hydra-results/{outputname}")
-    CKPT_DIR = config['logging_params']['ckpt_dir']
+    # Save results into Hydra's run directory for this job
+    logging_config['results_dir'] = hydra_run_dir
+    output_dir = hydra_run_dir
+
+    CKPT_DIR = logging_config['ckpt_dir']
     ckpt_dir_base = CKPT_DIR + f"/{outputname}/" if CKPT_DIR != "" else ""
     if master_process:
         # print(f"Loading configuration from {config_file}")
-        print(f"Training on dataset {config['training_data']['dataset']['name']}")
+        print(f"Training on dataset {config['data']['dataset']['name']}")
         os.makedirs(output_dir, exist_ok=True)  
         if CKPT_DIR != "": os.makedirs(ckpt_dir_base, exist_ok=True)
 
     # Load model
-    model = load_model(config['gpt_model'], device)
-        
-    # Set the training parameters
-    training_params = config['training_data']['training_params']
-    opt_config = config["optimizer_params"]
+    model = load_model(model_config, device)
     torch.set_float32_matmul_precision(training_params['tensorcore_precision'])
 
     # Load data
-    dataset_path = DATA_DIR + f"/{config['training_data']['dataset']['name']}-gpt2/"
+    dataset_path = DATA_DIR + f"/{config['data']['dataset']['name']}-gpt2/"
     if master_process: print(f"Load data from {dataset_path}")
     B, T = training_params['batch_size'], training_params['context_length']
     assert training_params['tokens_processed'] % (world_size * B * T) == 0 
+    num_microbatches = int(training_params['tokens_processed'] / (world_size * B * T))
+
     train_dataloader = ShardedDataLoader(dataset_path, B, T, "train", device)
     val_dataloader = ShardedDataLoader(dataset_path, B, T, "val", device)
     total_iterations = int(training_params['num_epochs'] * len(train_dataloader) / training_params['tokens_processed'])
@@ -67,7 +78,7 @@ def main(config : DictConfig):
         print(f"Training with optimizer {opt_config['name']} and learning rate {opt_config['lr']}")
         
     # Generate hash for the current optimizer configuration
-    config_hash = hash_config(OmegaConf.to_container(opt_config), OmegaConf.to_container(training_params), OmegaConf.to_container(config['gpt_model']))
+    config_hash = hash_config(OmegaConf.to_container(opt_config), OmegaConf.to_container(training_params), OmegaConf.to_container(model_config))
     file_name = f"{opt_config['name']}-lr-{opt_config['lr']}-{opt_config['lr_schedule']}-{config_hash}-world{world_size}"
     output_path = os.path.join(output_dir, file_name + '.json')
     ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
@@ -77,6 +88,17 @@ def main(config : DictConfig):
     
     # Setup optimizer
     optimizer_obj, hyperp = get_optimizer(opt_config, lr=opt_config['lr'])
+
+    if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', 0) > 0:
+        xtx_rate = opt_config['xtx_subsample']
+        training_params['mb_subsampling'] = xtx_rate
+
+        if num_microbatches < 1 / xtx_rate:
+            opt_config['xtx_subsample'] = num_microbatches * xtx_rate
+        else:
+            opt_config['xtx_subsample'] = None
+    else:
+        training_params['mb_subsampling'] = None
 
     if training_params['compile']:
         if master_process: print("Compiling model")
@@ -89,6 +111,7 @@ def main(config : DictConfig):
     p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
 
     if 'dap' in opt_name:
+        hyperp['num_microbatches'] = num_microbatches
         optimizer = optimizer_obj(model_copy, p, **hyperp)
     else:
         optimizer = optimizer_obj(p, **hyperp)
@@ -96,14 +119,18 @@ def main(config : DictConfig):
     scheduler = get_scheduler(opt_config, optimizer, total_iterations=total_iterations)
 
     # Initialize wandb
-    if master_process and config['logging_params'].get('wandb', None) is not None:
+    if master_process and logging_config.get('wandb', None) is not None:
         config_no_optimizer = copy.deepcopy(config)
-        del config_no_optimizer['optimizer_params']
+        config_no_optimizer = OmegaConf.to_container(config_no_optimizer, resolve=True)
+        config_no_optimizer.pop('optimizer_params', None)
+
         wandb_config = dict(one_optimizer_params=opt_config, **config_no_optimizer, world_size=world_size)
-        if "dir" not in config['logging_params']['wandb']:
-            config['logging_params']['wandb']['dir'] = f"{config['logging_params']['results_dir']}/../wandb"
+
+        wandb_args = dict(logging_config['wandb'])
+        wandb_args.setdefault('dir', f"{logging_config['results_dir']}/../wandb")
+
         wandb_run = wandb.init(
-            **config['logging_params']['wandb'],
+            **wandb_args,
             config=wandb_config,
             reinit='create_new',
         )
@@ -114,7 +141,7 @@ def main(config : DictConfig):
     try:
         logger = train(train_dataloader, val_dataloader, model_copy, optimizer, training_params,
                     scheduler=scheduler, ckpt_dir=ckpt_dir,
-                    logging_params=config['logging_params'], wandb_run=wandb_run)
+                    logging_params=logging_config, wandb_run=wandb_run)
     finally:
         if master_process and wandb_run is not None:
             wandb_run.finish()

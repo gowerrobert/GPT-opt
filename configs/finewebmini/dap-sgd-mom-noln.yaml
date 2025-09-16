@@ -4,7 +4,7 @@ optimizer_params:
     lr: [0.0001, 0.0005, 0.001, 0.005, 0.01]
     lr_schedule: constant
     momentum: 0.95
-    wd: 0
+    weight_decay: 0
     disable_preconditioning: True
     scalar: False
 

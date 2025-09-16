@@ -6,7 +6,7 @@ optimizer_params:
     dap_beta1: 0
     dap_beta2: 0
     momentum: 0.95
-    wd: 0
+    weight_decay: 0
     disable_preconditioning: False
     scalar: False
     ns_pinv_steps: 50
