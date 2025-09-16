@@ -7,10 +7,10 @@ defaults:
 
 # output directory, generated dynamically on each run
 run:
-  dir: logs/${model.name}/${data.dataset.name}/${optimizer.optimizer_params.name}/${paths.run_name}
+  dir: outputs/${model.name}/${data.dataset.name}/${optimizer.optimizer_params.name}/${paths.run_name}
   
 sweep:
-  dir: logs/${model.name}/${data.dataset.name}/${optimizer.optimizer_params.name}/multiruns
+  dir: outputs/${model.name}/${data.dataset.name}/${optimizer.optimizer_params.name}/multiruns
   subdir: ${paths.run_name}
 
 job_logging:

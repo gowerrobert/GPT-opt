@@ -29,7 +29,8 @@ def eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt):
                 val_loss += model(batch[0], batch[1], return_logits=False)[1]
             counter += 1
             if (val_accum_steps != 0) & (counter >= val_accum_steps): break
-    val_loss = torch.tensor(val_loss.clone().detach(), device=device)/counter
+    # Avoid constructing a new tensor from a tensor; detach and move
+    val_loss = (val_loss.detach() / counter).to(device)
     if world_size > 1: dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
     if rank == 0:
         print(f"Validation Loss: {val_loss.item()}")
@@ -82,9 +83,12 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         start_epoch = time.time()
         start_time = time.time() 
         loss_accum = 0.
-        step = 1 if load_ckpt_step == 0 else int(load_ckpt_step)
+        step = 1 if load_ckpt_step == 0 else int(load_ckpt_step)  # micro-step counter
+        opt_step = 0 if load_ckpt_step == 0 else int(load_ckpt_step) // grad_accum_steps  # optimizer step counter
         optimizer.zero_grad()
-        if step != 1: print(train_dataloader.get_state())
+        if step != 1 and master_process:
+            print(train_dataloader.get_state())
+            print(f"Resuming from micro_step={step}, opt_step={opt_step}")
         
         for batch in train_dataloader:
             if do_mb_subsampling:
@@ -116,12 +120,15 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 #bookkeeping
                 torch.cuda.synchronize()
                 step_time = time.time() - start_time
+                # Count an optimizer step
+                opt_step += 1
                 if master_process and wandb_run is not None:
                     wandb_log_dict = {
                         "train/loss": loss_accum.item(), 
                         "train/grad_norm": norm.item(),
                         "train/step_time": step_time,
-                        "train/step": step
+                        "train/step": opt_step,
+                        "train/micro_step": step
                     }
                     if hasattr(optimizer, 'step_size_list'):
                         wandb_log_dict["train/step_size_list"] = optimizer.step_size_list
@@ -136,18 +143,18 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 if hasattr(optimizer, 'step_size_list'):  
                     logger.step_size_list = optimizer.step_size_list  
                 
-                if (step % logging_params['log_step'] == 0) & master_process:
+                if (opt_step % logging_params['log_step'] == 0) & master_process:
                     tps = training_params["tokens_processed"] / step_time
-                    print(f"Step {step} of {total_iterations*grad_accum_steps}.")
-                    print(f"Time taken : {step_time*1000:0.1f}ms | Tokens/s : {tps/1000:0.1f}k | Loss : {loss_accum.item():0.3f}")
+                    print(f"Step {opt_step} of {total_iterations} (optimizer steps).")
+                    print(f"Time taken : {step_time*1000:0.1f}ms | Tokens/s : {tps/1000:0.1f}k | Loss : {loss_accum.item():0.3f} | Accum: {grad_accum_steps} micro-steps/opt-step")
                     
-                if (step % logging_params['val_step'] == 0):
+                if (opt_step % logging_params['val_step'] == 0):
                     val_loss = eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt)
                     if master_process and wandb_run is not None:
-                        wandb_run.log({"val/loss": val_loss.item(), "val/step": step})
+                        wandb_run.log({"val/loss": val_loss.item(), "val/step": opt_step, "val/micro_step": step})
                     logger.val_losses.append(val_loss.item())
 
-                if (step % logging_params['save_ckpt_step'] == 0) & (ckpt_dir != ""):
+                if (opt_step % logging_params['save_ckpt_step'] == 0) & (ckpt_dir != ""):
                     save_checkpoint(ckpt_dir, step, model, optimizer, loss_accum.item(),
                                     train_dataloader, scheduler, logging_params['keep_last'])
                     
@@ -174,7 +181,14 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 with open(ckpt_dir + '/log.json', 'w') as file:
                     json.dump(logger.__dict__, file)
         if master_process and wandb_run is not None:
-            wandb_run.log({"val/loss": val_loss.item(), "val/step": step, "train/loss": logger.losses[-1], "train/step": step})
+            wandb_run.log({
+                "val/loss": val_loss.item(),
+                "val/step": opt_step,
+                "val/micro_step": step,
+                "train/loss": logger.losses[-1],
+                "train/step": opt_step,
+                "train/micro_step": step,
+            })
 
     if hasattr(optimizer, 'step_size_list'):      # Check if optimizer has a step_size_list attribute
         logger.step_size_list = optimizer.step_size_list  
