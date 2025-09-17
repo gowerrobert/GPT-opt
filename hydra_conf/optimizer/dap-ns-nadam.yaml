@@ -2,9 +2,9 @@ optimizer_params:
   name: dap-ns-nadam
   lr: 0.0003
   dap_beta1: 0.95
-  dap_beta2: 0.9999
+  dap_beta2: 0.999
   momentum: 0
-  weight_decay: 0
+  weight_decay: 0.0
   disable_preconditioning: False
   scalar: False
   ns_pinv_steps: 50
@@ -12,8 +12,7 @@ optimizer_params:
   nesterov: True
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  adagradnorm: False
-  accelerated: add_eps_1e-3
+  accelerated: 1e-3
   rcond: 1e-3
   xtx_subsample: null
   mb_subsampling: True

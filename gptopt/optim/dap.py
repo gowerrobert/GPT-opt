@@ -105,8 +105,6 @@ class DAP(Optimizer):
         debug_timing: bool = True,
         use_bf16: bool = False,
         use_fp64: bool = False,
-        moments_on_precond: bool = False,
-        adagradnorm: bool = False,
         refresh_precond_iters=None,
         accelerated: bool = False,
         spectral_norm_estimator: str = "power_method",  # "power_method", "frobenius"
@@ -126,8 +124,6 @@ class DAP(Optimizer):
             dap_eps=dap_eps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
-            moments_on_precond=moments_on_precond,
-            adagradnorm=adagradnorm,
         )
 
         if not disable_preconditioning:
@@ -330,14 +326,19 @@ class DAP(Optimizer):
             with SimpleTimer(
                 "pinv", device, self._pending_timing_events, enabled=self.debug_timing
             ):
-                if self.accelerated == "add_eps_1e-3":
+                # Determine if accelerated should use an explicit add_eps value (floats only)
+                add_eps_value = None
+                if isinstance(self.accelerated, (int, float)):
+                    add_eps_value = float(self.accelerated)
+
+                if add_eps_value is not None:
                     Cinv, info = accelerated_ns_pinv(
                         C_op,
                         l=eps,
                         u=1.2 * sig_max,
                         max_steps=self.ns_pinv_steps,
                         psd=True,
-                        add_eps=1e-3,  # note this is absolute, not relative to sig_max, unlike the others
+                        add_eps=add_eps_value,  # absolute, not relative to sig_max
                         early_stop_eps=eps,
                         dtype=torch.float32,
                         diagnostics=False,
@@ -530,8 +531,6 @@ class DAP(Optimizer):
             dap_beta1 = group["dap_beta1"]
             dap_beta2 = group["dap_beta2"]
             dap_eps = group["dap_eps"]
-            moments_on_precond = group["moments_on_precond"]
-            adagradnorm = group["adagradnorm"]
 
             params = [p for p in group["params"] if self.state[p]["use_dap"]]
 
@@ -598,64 +597,32 @@ class DAP(Optimizer):
                         else:
                             C_eff = C_cur
 
-                if moments_on_precond:
-                    # Precondition raw gradient if available; otherwise identity
-                    if C_eff is not None:
-                        u_pre, pm_iters, ns_iters = self._precondition_cached(
-                            g, C_eff, p, step, cache_key="grad"
-                        )
-                        if self.debug_timing:
-                            total_power_method_iters += pm_iters
-                            total_ns_iters += ns_iters
-                    else:
-                        u_pre, pm_iters, ns_iters = g, 0, 0
+                # First compute momentum/EMA on raw gradient, then (optionally) precondition
+                m_t = self._apply_first_moment(
+                    g,
+                    state,
+                    momentum,
+                    group["nesterov"],
+                    dap_beta1,
+                    prefix="",
+                )
 
-                    m_t = self._apply_first_moment(
-                        u_pre,
-                        state,
-                        momentum,
-                        group["nesterov"],
-                        dap_beta1,
-                        prefix="_pre",
-                    )
-                    # Numerator in preconditioned space (bias-corrected)
-                    num = (
-                        self._nadam_numerator(m_t, u_pre, dap_beta1, step)
-                        if use_nadam
-                        else self._adam_numerator(m_t, dap_beta1, step)
-                    )
-
-                    u = num
-                    second_moment_src = u_pre
+                if use_nadam:
+                    num_grad = self._nadam_numerator(m_t, g, dap_beta1, step)
+                elif dap_beta1 > 0.0:
+                    num_grad = self._adam_numerator(m_t, dap_beta1, step)
                 else:
-                    # First compute momentum/EMA on raw gradient, then (optionally) precondition
-                    m_t = self._apply_first_moment(
-                        g,
-                        state,
-                        momentum,
-                        group["nesterov"],
-                        dap_beta1,
-                        prefix="",
+                    num_grad = m_t
+
+                if C_eff is not None:
+                    u, pm_iters, ns_iters = self._precondition_cached(
+                        num_grad, C_eff, p, step, cache_key="numgrad"
                     )
-
-                    if use_nadam:
-                        num_grad = self._nadam_numerator(m_t, g, dap_beta1, step)
-                    elif dap_beta1 > 0.0:
-                        num_grad = self._adam_numerator(m_t, dap_beta1, step)
-                    else:
-                        num_grad = m_t
-
-                    if C_eff is not None:
-                        u, pm_iters, ns_iters = self._precondition_cached(
-                            num_grad, C_eff, p, step, cache_key="numgrad"
-                        )
-                        if self.debug_timing:
-                            total_power_method_iters += pm_iters
-                            total_ns_iters += ns_iters
-                    else:
-                        u, pm_iters, ns_iters = num_grad, 0, 0
-
-                    second_moment_src = u
+                    if self.debug_timing:
+                        total_power_method_iters += pm_iters
+                        total_ns_iters += ns_iters
+                else:
+                    u, pm_iters, ns_iters = num_grad, 0, 0
 
                 if self.debug_timing:
                     num_dap_params += 1
@@ -664,30 +631,13 @@ class DAP(Optimizer):
                 p.data.mul_(1 - lr * wd)
 
                 if dap_beta2 > 0.0:
-                    if adagradnorm:
-                        # Maintain a scalar EMA of the squared RAW gradient norm.
-                        # Uses the same beta (dap_beta2) and bias correction as Adam's second moment.
-                        key = "grad_sqnorm_ema"
-                        if key not in state:
-                            state[key] = torch.tensor(
-                                0.0, device=p.device, dtype=p.dtype
-                            )
-                        # squared L2 norm of the raw gradient
-                        sqnorm = g.square().sum()
-                        state[key].lerp_(sqnorm, 1.0 - dap_beta2)
-
-                        # Bias-corrected denominator: sqrt(v_hat) + eps
-                        bc2 = 1.0 - (dap_beta2**step)
-                        denom = (state[key] / bc2).sqrt() + dap_eps
-                        p.data.add_(u / denom, alpha=-lr)
-                    else:
-                        # Adam-style per-parameter normalization and bias correction (epsilon in denominator)
-                        if "dap_moment2" not in state:
-                            state["dap_moment2"] = torch.zeros_like(u)
-                        v = state["dap_moment2"]
-                        v.lerp_(second_moment_src.square(), 1 - dap_beta2)
-                        denom = self._adam_denominator(v, dap_beta2, step, dap_eps)
-                        p.data.add_(u / denom, alpha=-lr)
+                    # Adam-style per-parameter normalization and bias correction (epsilon in denominator)
+                    if "dap_moment2" not in state:
+                        state["dap_moment2"] = torch.zeros_like(u)
+                    v = state["dap_moment2"]
+                    v.lerp_(u.square(), 1 - dap_beta2)
+                    denom = self._adam_denominator(v, dap_beta2, step, dap_eps)
+                    p.data.add_(u / denom, alpha=-lr)
                 else:
                     # No second-moment normalization.
                     p.data.add_(u, alpha=-lr)

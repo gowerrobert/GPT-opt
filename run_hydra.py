@@ -1,9 +1,9 @@
 import torch
 from gptopt.train_distributed import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
-from gptopt.utils import hash_config, set_seed, get_worker_info
+from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir
 from gptopt.model import load_model
-from gptopt.dataloader import DATA_DIR, ShardedDataLoader
+from gptopt.dataloader import ShardedDataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import copy 
@@ -60,7 +60,8 @@ def main(config : DictConfig):
     torch.set_float32_matmul_precision(training_params['tensorcore_precision'])
 
     # Load data
-    dataset_path = DATA_DIR + f"/{config['data']['dataset']['name']}-gpt2/"
+    data_dir = get_data_dir(config['data']['dataset']['name'])
+    dataset_path = data_dir + f"/{config['data']['dataset']['name']}-gpt2/"
     if master_process: print(f"Load data from {dataset_path}")
     B, T = training_params['batch_size'], training_params['context_length']
     assert training_params['tokens_processed'] % (world_size * B * T) == 0 

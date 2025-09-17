@@ -26,9 +26,14 @@ data_settings = {
     "slim_pajama": {
         "load_args": ["cerebras/SlimPajama-627B"],
         "load_kwargs": {"split": "train", "streaming": True},
-    }
+    },
+    "slim_pajama10B": {
+        "load_args": ["cerebras/SlimPajama-627B"],
+        "load_kwargs": {"split": "train", "streaming": True},
+        "target_tokens": 10_100_000_000,
+    },
 }
-DATA_DIR = "/mnt/ceph/users/cmodi/huggingface"
+DATA_DIR = "/mnt/ceph/users/nghosh/huggingface"
 
 
 # parse command line arguments
@@ -72,6 +77,8 @@ elif name == "wikitext":
         write_datafile(filename, tokens)
 
 elif any([dset in name for dset in ['fineweb', 'slim_pajama']]):
-    process_and_save_docs(dataset, dataset_path, encoding=enc, shard_size=args.shard_size, nprocs=args.nprocs)
+    target_tokens = settings.get("target_tokens", None)
+    max_shards = settings.get("max_shards", None)
+    process_and_save_docs(dataset, dataset_path, encoding=enc, shard_size=args.shard_size, nprocs=args.nprocs, target_tokens=target_tokens, max_shards=max_shards)
 
 print(f"{name} data processed and saved in {dataset_path}")

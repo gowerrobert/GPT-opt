@@ -7,6 +7,14 @@ import json
 import torch.distributed as dist
 import os
 
+def get_data_dir(dataset_name):
+    if dataset_name == 'slim_pajama1B':
+        return "/mnt/ceph/users/mcrawshaw/huggingface"
+    elif dataset_name == 'slim_pajama10B':
+        return "/mnt/ceph/users/nghosh/huggingface"
+    else:
+        return "/mnt/ceph/users/cmodi/huggingface"
+
 def set_xtx_mode(mod: torch.nn.Module, xtx_mode: bool):
     for m in mod.modules():
         if hasattr(m, "xtx_mode"):

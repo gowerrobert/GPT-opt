@@ -31,5 +31,5 @@ source venv/bin/activate
 export PYTHONUNBUFFERED=1
 
 # Run the Python script with the config file
-srun -u bash "$SCRIPT" "$@"
+srun -u bash "$SCRIPT" $@
 EOF
