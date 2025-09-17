@@ -3,10 +3,14 @@
 # Load project configuration
 source project_config.sh
 
-# Check if exactly 4 arguments are provided
-if [ "$#" -ne 4 ]; then
+# Accept 4 or 5 args:
+#   SPREAD (default): ./submit.sh <bash_script> <param_file> <group_name> <gpus> [SPREAD]
+#   NODES:   ./submit.sh <bash_script> <param_file> <group_name> <nodes> NODES
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
     echo "Error: Missing arguments."
-    echo "Usage: $0 <bash_script> <param_file> <group_name> <nodes>"
+    echo "Usage:"
+    echo "  $0 <bash_script> <param_file> <group_name> <gpus> [SPREAD]"
+    echo "  $0 <bash_script> <param_file> <group_name> <nodes> NODES"
     exit 1
 fi
 
@@ -14,7 +18,12 @@ fi
 bash_script=$1
 param_file=$2
 group_name=$3
-nodes=$4
+count=$4                # GPUs (default) or nodes (if mode == NODES)
+mode=${5:-SPREAD}       # default to SPREAD
+mode=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
+
+# Choose partition via env var (default gpu). Example: PARTITION=eval ./submit.sh ...
+partition=${PARTITION:-gpu}
 
 # Set up environment variables and directories
 LOG_DIR="${ROOT_DIR}/logs/${group_name}"
@@ -26,7 +35,9 @@ echo "Configuration:"
 echo "bash_script: $bash_script"
 echo "param_file: $param_file"
 echo "group_name: $group_name"
-echo "nodes: $nodes"
+echo "count: $count"
+echo "mode: $mode"
+echo "partition: $partition"
 
 # Create necessary directories
 mkdir -p "$RUN_INFO_DIR"
@@ -80,6 +91,18 @@ export RUN_INFO_DIR
 
 # Submit the sbatch job
 echo "Submitting sbatch job..."
-sbatch --nodes="$nodes" slurm_scripts/sbatch.sh
+if [ "$mode" = "NODES" ]; then
+    # full-node behavior:
+    #   - sbatch.sh currently pins 4 tasks per node.
+    nodes="$count"
+    total_tasks=$(( nodes * 4 ))
+    sbatch --partition="$partition" --nodes="$nodes" --ntasks="$total_tasks" --job-name="$group_name" slurm_scripts/sbatch.sh
+else
+    # Default SPREAD mode (recommended):
+    #   - Request <gpus> total tasks (1 GPU per task from sbatch.sh)
+    #   - Allow SLURM to scatter across multiple nodes by overriding --nodes=1 with a range.
+    gpus="$count"
+    sbatch --partition="$partition" --ntasks="$gpus" --job-name="$group_name" slurm_scripts/sbatch.sh
+fi
 echo "Job submitted. Check slurm logs for job status."
 

@@ -2,7 +2,7 @@ optimizer_params:
   name: dap-ns-nadam
   lr: 0.0003
   dap_beta1: 0.95
-  dap_beta2: 0.999
+  dap_beta2: 0.9999
   momentum: 0
   weight_decay: 0
   disable_preconditioning: False

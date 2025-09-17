@@ -5,6 +5,7 @@ output/
 outputs/
 logs/
 slurm_logs/
+disbatch_logs/
 .vscode/
 gptopt.egg-info/
 __pycache__/
