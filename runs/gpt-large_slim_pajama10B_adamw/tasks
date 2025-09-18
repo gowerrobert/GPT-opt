@@ -1,0 +1,4 @@
+bash slurm_scripts/launch_ddp_local.sh ./scripts/run_slim_pajama10B_adam_large.sh 3e-05 0.1 > runs/gpt-large_slim_pajama10B_adamw/logs/log_0.out 2> runs/gpt-large_slim_pajama10B_adamw/logs/log_0.err
+bash slurm_scripts/launch_ddp_local.sh ./scripts/run_slim_pajama10B_adam_large.sh 0.0001 0.1 > runs/gpt-large_slim_pajama10B_adamw/logs/log_1.out 2> runs/gpt-large_slim_pajama10B_adamw/logs/log_1.err
+bash slurm_scripts/launch_ddp_local.sh ./scripts/run_slim_pajama10B_adam_large.sh 0.0003 0.1 > runs/gpt-large_slim_pajama10B_adamw/logs/log_2.out 2> runs/gpt-large_slim_pajama10B_adamw/logs/log_2.err
+bash slurm_scripts/launch_ddp_local.sh ./scripts/run_slim_pajama10B_adam_large.sh 0.001 0.1 > runs/gpt-large_slim_pajama10B_adamw/logs/log_3.out 2> runs/gpt-large_slim_pajama10B_adamw/logs/log_3.err

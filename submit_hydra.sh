@@ -5,13 +5,15 @@ SCRIPT_NAME=$(basename "$SCRIPT")
 
 # Remove the script path from the positional parameters so only user args remain (e.g., lr, wd)
 shift
+GPUS="${GPUS:-1}"
 
-mkdir -p output/slurm_logs
+mkdir -p slurm_logs
 
 sbatch <<EOF
 #!/bin/bash
 #SBATCH -J ${SCRIPT_NAME}
-#SBATCH --gpus=1
+#SBATCH --gpus=${GPUS}
+#SBATCH --nodes=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --time=60:00:00
 #SBATCH --partition=gpu
@@ -30,6 +32,6 @@ source venv/bin/activate
 
 export PYTHONUNBUFFERED=1
 
-# Run the Python script with the config file
-srun -u bash "$SCRIPT" $@
+# Always launch via torchrun with one worker per GPU; run the provided bash script in each worker
+torchrun --standalone --no_python --nproc_per_node=${GPUS} bash "${SCRIPT}" $@
 EOF
