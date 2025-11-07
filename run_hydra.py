@@ -1,7 +1,7 @@
 import torch
 from gptopt.train_distributed import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
-from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir
+from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir, swap_linears_for_xtx
 from gptopt.model import load_model
 from gptopt.dataloader import ShardedDataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -87,7 +87,7 @@ def main(config : DictConfig):
     
     # copy model to ensure consistency
     model_copy = copy.deepcopy(model).to(device)
-    
+    opt_name = opt_config['name']
     # Setup optimizer
     optimizer_obj, hyperp = get_optimizer(opt_config, lr=opt_config['lr'])
 
@@ -102,6 +102,9 @@ def main(config : DictConfig):
     else:
         training_params['mb_subsampling'] = None
 
+    if 'dap' in opt_name:
+        swap_linears_for_xtx(model_copy)
+
     if training_params['compile']:
         if master_process: print("Compiling model")
         model_copy = torch.compile(model_copy)
@@ -109,7 +112,7 @@ def main(config : DictConfig):
     if ddp:
         model_copy = DDP(model_copy, device_ids=[local_rank])
     
-    opt_name = opt_config['name']
+    
     p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
 
     if 'dap' in opt_name:

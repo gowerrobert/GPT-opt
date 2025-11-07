@@ -164,6 +164,8 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'xtx_subsample': opt_config.get('xtx_subsample', 1.0),
                   'num_microbatches': opt_config.get('num_microbatches', None),
                   'mb_subsampling': opt_config.get('mb_subsampling', False),
+                  'update_norm': opt_config.get('update_norm', False),
+                  'update_opnorm': opt_config.get('update_opnorm', False),
                   }
 
     elif 'muon' in name:

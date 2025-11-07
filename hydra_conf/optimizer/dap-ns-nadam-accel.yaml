@@ -1,5 +1,5 @@
 optimizer_params:
-  name: dap-ns-nadam
+  name: dap-ns-nadam-accel
   lr: 0.0003
   dap_beta1: 0.95
   dap_beta2: 0.999
@@ -12,7 +12,7 @@ optimizer_params:
   nesterov: True
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  accelerated: 1e-3
+  accelerated: True
   rcond: 1e-3
   xtx_subsample: null
   mb_subsampling: True

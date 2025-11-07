@@ -4,7 +4,7 @@ from torch.optim import Optimizer
 from gptopt.linalg_utils import ns_pinv, ns_pinv_v2, accelerated_ns_pinv, power_method
 from gptopt.optim.timing import SimpleTimer, install_forward_cuda_timers
 
-from typing import Optional
+from typing import Optional, Dict
 import torch.nn.functional as F
 
 import os
@@ -54,31 +54,6 @@ class LinearWithXtX(nn.Linear):
             self._accum_xtx(x)
         return y
 
-def swap_linears_for_xtx(mod: torch.nn.Module):
-    for name, child in list(mod.named_children()):
-        if isinstance(child, LinearWithXtX):
-            swap_linears_for_xtx(child)
-            continue
-
-        if isinstance(child, nn.Linear):
-            repl = LinearWithXtX(
-                child.in_features,
-                child.out_features,
-                bias=(child.bias is not None),
-                track_xtx=False,  # <- OFF by default; optimizer will enable per DAP layer
-            ).to(device=child.weight.device)
-            repl.train(child.training)
-
-            with torch.no_grad():
-                repl.weight.data = child.weight.detach().clone()
-                if child.bias is not None:
-                    repl.bias.data = child.bias.detach().clone()
-
-            setattr(mod, name, repl)
-            swap_linears_for_xtx(repl)
-        else:
-            swap_linears_for_xtx(child)
-
 class DAP(Optimizer):
     def __init__(
         self,
@@ -111,6 +86,8 @@ class DAP(Optimizer):
         xtx_subsample: Optional[float] = None,
         mb_subsampling: bool = False,
         num_microbatches: Optional[int] = None,
+        update_norm: bool = False,
+        update_opnorm: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -124,15 +101,9 @@ class DAP(Optimizer):
             dap_eps=dap_eps,
             adamw_betas=adamw_betas,
             adamw_eps=adamw_eps,
+            update_norm=update_norm,
+            update_opnorm=update_opnorm,
         )
-
-        if not disable_preconditioning:
-            needs_swap = any(
-                isinstance(m, nn.Linear) and not isinstance(m, LinearWithXtX)
-                for m in model.modules()
-            )
-            if needs_swap:
-                swap_linears_for_xtx(model)
 
         dap_params, dap_params_names = [], []
         adamw_params, adamw_params_names = [], []
@@ -249,6 +220,7 @@ class DAP(Optimizer):
 
         self.dap_modules = []
         self.param_to_module = {}
+        self._step_cov: Dict[torch.nn.Parameter, torch.Tensor] = {}
 
         if not self.disable_preconditioning:
             self._wire_up_xtx_sources(model, dap_params)
@@ -328,7 +300,7 @@ class DAP(Optimizer):
             ):
                 # Determine if accelerated should use an explicit add_eps value (floats only)
                 add_eps_value = None
-                if isinstance(self.accelerated, (int, float)):
+                if isinstance(self.accelerated, (int, float)) and not isinstance(self.accelerated, bool):
                     add_eps_value = float(self.accelerated)
 
                 if add_eps_value is not None:
@@ -536,6 +508,7 @@ class DAP(Optimizer):
 
             # Before applying updates, finalize accumulated covariance per parameter if present
             if not self.disable_preconditioning:
+                self._step_cov.clear()
                 for p, mod in self.param_to_module.items():
                     count = mod.C_accum_count.item()
                     if not count:
@@ -545,22 +518,26 @@ class DAP(Optimizer):
                     C_mean = C_sum / count
 
                     state = self.state[p]
-                    C_prev = state.get("C_ema", None)
 
-                    if self.debug_timing and C_prev is not None:
-                        diff = C_mean - C_prev
-                        rel = (1.0 - self.ema_beta) * (
-                            diff.norm("fro") / C_prev.norm("fro").clamp_min(1e-12)
-                        )
-                        self._C_ema_rel_change_accum += rel.item()
-                        self._C_ema_update_count += 1
-
-                    if C_prev is None or self.ema_beta == 0.0:
-                        state["C_ema"] = C_mean.clone()
+                    if self.ema_beta == 0.0:
+                        self._step_cov[p] = C_mean
                     else:
-                        C_prev.mul_(self.ema_beta).add_(
-                            C_mean, alpha=(1.0 - self.ema_beta)
-                        )
+                        C_prev = state.get("C_ema", None)
+
+                        # Original diff metric: C_mean - C_prev (pre-update EMA)
+                        if self.debug_timing and C_prev is not None:
+                            diff = C_mean - C_prev
+                            rel = (1.0 - self.ema_beta) * (
+                                diff.norm("fro") / C_prev.norm("fro").clamp_min(1e-12)
+                            )
+                            self._C_ema_rel_change_accum += rel.item()
+                            self._C_ema_update_count += 1
+
+                        # Update EMA snapshot
+                        if C_prev is None:
+                            state["C_ema"] = C_mean.detach().clone()
+                        else:
+                            C_prev.mul_(self.ema_beta).add_(C_mean, alpha=(1.0 - self.ema_beta))
 
                     mod.C_accum_sum.zero_()
                     mod.C_accum_count.zero_()
@@ -585,7 +562,7 @@ class DAP(Optimizer):
                 # Determine if we can/should precondition this parameter this step
                 C_eff = None
                 if not self.disable_preconditioning:
-                    C_cur = state.get("C_ema", None)
+                    C_cur = self._step_cov.get(p, self.state[p].get("C_ema", None))
                     if C_cur is not None:
                         if damping:
                             trace_C = torch.trace(C_cur)
@@ -630,6 +607,7 @@ class DAP(Optimizer):
                 # apply weight decay
                 p.data.mul_(1 - lr * wd)
 
+                # Build the raw update O (before learning-rate scaling)
                 if dap_beta2 > 0.0:
                     # Adam-style per-parameter normalization and bias correction (epsilon in denominator)
                     if "dap_moment2" not in state:
@@ -637,10 +615,24 @@ class DAP(Optimizer):
                     v = state["dap_moment2"]
                     v.lerp_(u.square(), 1 - dap_beta2)
                     denom = self._adam_denominator(v, dap_beta2, step, dap_eps)
-                    p.data.add_(u / denom, alpha=-lr)
+                    o = u / denom
                 else:
                     # No second-moment normalization.
-                    p.data.add_(u, alpha=-lr)
+                    o = u
+
+                # Optionally normalize O: operator norm or RMS
+                if group["update_opnorm"]:
+                    # Use power iteration on O^T O to estimate the top singular value
+                    OtO = (o.transpose(0, 1) @ o).to(torch.float32)
+                    sig2, _ = power_method(OtO, max_iters=self.ns_pinv_steps, psd=True, return_iters=True)
+                    sig = sig2.sqrt()
+                    o = o / sig.clamp_min(1e-12)
+                elif group["update_norm"]:
+                    rms = o.pow(2).mean().sqrt()
+                    o = o * (0.2 / rms.clamp_min(1e-12))
+
+                # Apply update with learning rate
+                p.data.add_(o, alpha=-lr)
 
             ############################
             #       AdamW backup       #
@@ -756,5 +748,7 @@ class DAP(Optimizer):
 
         for mod in self.dap_modules:
             mod._xtx_mults_this_step.zero_()
+
+        self._step_cov.clear()
 
         return loss
