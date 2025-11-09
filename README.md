@@ -83,6 +83,10 @@ For distributed training across multiple nodes:
 
 ## Configuration System
 
+Hydra lets us assemble experiment configurations from small, composable pieces and override them at the command line without editing YAML files. Each config group in `hydra_conf/` corresponds to a different aspect of the training stack (model architecture, optimizer, dataset, logging, etc.). Hydra merges the selected configs into a single runtime configuration, snapshots it in `outputs/<run>/.hydra/`, and makes every field accessible to Python code via the OmegaConf API.
+
+For a deeper dive into how Hydra works, common patterns, and the reasoning behind our layout, see the dedicated guide in `docs/hydra.md`.
+
 ### Hydra Config Structure
 
 ```
@@ -94,6 +98,8 @@ hydra_conf/
 └── logging/        # default, wandb
 ```
 
+Each directory is a config group. The default choice for a group is defined in `hydra_conf/config.yaml`, but CLI overrides let you swap any component on the fly. You can also enable additional configs without replacing the defaults by prefixing with `+`, which is useful for stacking logging or callback configs.
+
 ### Selecting Configs
 
 ```bash
@@ -103,6 +109,20 @@ python run_hydra.py \
     training=slim_pajama10B \    # Use training/slim_pajama10B.yaml
     data=slim_pajama10B          # Use data/slim_pajama10B.yaml
 ```
+
+Hydra parses the dotted overrides (`optimizer.optimizer_params.lr=...`) and updates only that field, leaving the rest of the config untouched. You can chain as many overrides as needed, and they are type-checked against the schema in the YAML files.
+
+### Multirun Sweeps
+
+Hydra's multirun mode (`-m`) generates cartesian products of parameter values—handy for local sweeps before scaling out to SLURM:
+
+```bash
+python run_hydra.py -m \
+    optimizer.optimizer_params.lr=0.0003,0.001,0.003 \
+    training.training_params.batch_size=16,32
+```
+
+Runs are numbered under `multirun/<timestamp>/` and each one captures the exact config it used. The SLURM sweep scripts reuse the same idea under the hood by materializing all override combinations.
 
 ### Example Config Files
 
