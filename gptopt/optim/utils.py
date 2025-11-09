@@ -6,6 +6,7 @@ from transformers import get_cosine_schedule_with_warmup
 from .momo import Momo
 from .momo_adam import MomoAdam
 from .muon import Muon
+from .sign_gd import SignGD
 # from .sps import SPS
 # from .adabound import AdaBoundW
 # from .adabelief import AdaBelief
@@ -58,7 +59,8 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)),
-                  'eps': opt_config.get('eps', 1e-8)
+                  'eps': opt_config.get('eps', 1e-8),
+                  'fused': True
                   }
     
     elif name == 'adamw':
@@ -66,7 +68,8 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)),
-                  'eps': opt_config.get('eps', 1e-8)
+                  'eps': opt_config.get('eps', 1e-8),
+                  'fused': True
                   }
     
     elif name == 'momo':
@@ -111,14 +114,45 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'use_fstar': True
                   }
 
-    elif name == 'muon':
+    elif 'muon' in name:
         opt_obj = Muon
+        lmo = 'nonlmo' not in name
+        l2_prod_norm = 'l2_prod' in name
+        rms_layer_norm = 'rms' in name
+        if "nuc_fro" in name:
+            nuc_approx = "fro"
+        elif "nuc_past" in name:
+            nuc_approx = "past"
+        else:
+            nuc_approx = None
         hyperp = {'lr': lr,
                   'wd': opt_config.get('weight_decay', 0),
                   'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
                   'momentum': opt_config.get('momentum', 0.95),
                   'nesterov': True,
-                  'ns_steps': opt_config.get('ns_steps', 5)
+                  'ns_steps': opt_config.get('ns_steps', 5),
+                  'lmo': lmo,
+                  'l2_prod_norm': l2_prod_norm,
+                  'nuc_approx': nuc_approx,
+                  'rms_layer_norm': rms_layer_norm,
+                  }
+
+    elif name == 'sign-gd':
+        opt_obj = SignGD
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'nesterov': opt_config.get('nesterov', False),
+                  'lmo': True
+                  }
+
+    elif name == 'sign-gd-nonlmo':
+        opt_obj = SignGD
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'nesterov': opt_config.get('nesterov', False),
+                  'lmo': False
                   }
 
     # elif name == 'iam':
@@ -194,12 +228,25 @@ def get_scheduler(config: dict, opt: torch.optim.Optimizer, total_iterations = N
         scheduler = StepLR(opt, step_size=step_size, gamma=gamma)
 
     elif 'warm-up-cosine' in name:
-        num_warmup_steps = int(config['warm_up_percent'] * total_iterations) 
+        num_warmup_steps = int(config['warm_up_fraction'] * total_iterations) 
         scheduler = get_cosine_schedule_with_warmup(
                     opt,
                     num_warmup_steps=num_warmup_steps,
                     num_training_steps=total_iterations
                     )
+
+
+    elif 'constant-linear' in name:  # New scheduler
+        num_warmup_steps = int(config['warm_up_fraction'] * total_iterations)
+
+        def get_lr(step):
+            if step < num_warmup_steps:
+                return 1.0  # Constant learning rate during warm-up
+            else:
+                # Linearly decay after warm-up
+                return max(0.1, 1.0 - (step - num_warmup_steps) / (total_iterations - num_warmup_steps))
+
+        scheduler = LambdaLR(opt, lr_lambda=get_lr)
         
     else:
         raise ValueError(f"Unknown learning rate schedule name {name}.")

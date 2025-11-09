@@ -8,11 +8,11 @@ from gptopt.utils import hash_config, set_seed, get_worker_info
 #from gptopt.utils import get_default_config, load_config
 from gptopt.model import load_model
 from gptopt.dataloader import DATA_DIR, ShardedDataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import copy 
 import json
 import os
+
 
 parser = argparse.ArgumentParser(description='Train GPT-2 with optional config file.')
 parser.add_argument('--config', type=str, help='Path to config file', default=None)
@@ -21,11 +21,6 @@ args = parser.parse_args()
 set_seed(42)
 
 # First set up DDP
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-if ddp:
-    # use of DDP atm demands CUDA, we set the device appropriately according to rank
-    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
-    dist.init_process_group(backend='nccl')
 world_size, rank, local_rank, device = get_worker_info()
 master_process = (rank == 0) # this process will do logging, checkpointing etc.
 device_type = "cuda" if device.startswith("cuda") else "cpu"
@@ -40,6 +35,7 @@ outputname = config_file.replace("configs/","").replace('.yaml','')
 output_dir = f"gptopt/outputs/{outputname}"
 CKPT_DIR = config['logging_params']['ckpt_dir']
 ckpt_dir_base = CKPT_DIR + f"/{outputname}/" if CKPT_DIR != "" else ""
+
 if master_process:
     print(f"Loading configuration from {config_file}")
     print(f"Training on dataset {config['dataset']['name']}")
@@ -88,8 +84,6 @@ for opt_config in list_optimizer_params:
         if training_params['compile']:
             if master_process: print("Compiling model")
             model_copy = torch.compile(model_copy)
-        if ddp:
-            model_copy = DDP(model_copy, device_ids=[local_rank])
 
         # Setup optimizer
         optimizer_obj, hyperp = get_optimizer(opt_config, lr=lr)
@@ -110,6 +104,3 @@ for opt_config in list_optimizer_params:
             with open(output_path, 'w') as file:
                 json.dump(logger.__dict__, file)
             print(f"Saved output to {output_path}")
-
-if ddp:
-    dist.destroy_process_group()
