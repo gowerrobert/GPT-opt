@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from gptopt.train_distributed import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
 from gptopt.utils import hash_config, set_seed, get_worker_info
-#from gptopt.utils import get_default_config, load_config
 from gptopt.model import load_model
 from gptopt.dataloader import DATA_DIR, ShardedDataLoader
 import torch.distributed as dist
@@ -31,7 +30,6 @@ print(f"Using device: {device}")
 config_file = args.config
 with open(config_file, 'r') as file:
     config = yaml.safe_load(file)
-#config = load_config(get_default_config(), config_file)
 outputname = config_file.replace("configs/","").replace('.yaml','')
 output_dir = f"gptopt/outputs/{outputname}"
 CKPT_DIR = config['logging_params']['ckpt_dir']

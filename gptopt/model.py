@@ -1,4 +1,4 @@
-from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AutoTokenizer, AutoModelForCausalLM
+from transformers import GPT2LMHeadModel, GPT2Config, AutoTokenizer, AutoModelForCausalLM
 from .gpt_model import GPT, GPTConfig
 
 def load_model_and_tokenizer(config, device):

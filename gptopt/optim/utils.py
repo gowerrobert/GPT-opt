@@ -209,48 +209,6 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'lmo': False
                   }
 
-    # elif name == 'iam':
-    #     opt_obj = IAM
-    #     hyperp = {'lr': lr,
-    #               'weight_decay': opt_config.get('weight_decay', 0),
-    #               'betas': opt_config.get('betas', (0.9, 0.999)),
-    #               'eps': opt_config.get('eps', 1e-8),
-    #               'lb': opt_config.get('lb', 0.),
-    #               'divide': opt_config.get('divide', True),
-    #               'use_fstar': True
-    #               }          
-    # elif name == 'prox-sps':
-    #     opt_obj = SPS
-    #     hyperp = {'lr': lr,
-    #               'weight_decay': opt_config.get('weight_decay', 0),
-    #               'lb': opt_config.get('lb', 0.),
-    #               'prox': True
-    #               }
-    
-    # elif name == 'adabound':
-    #     opt_obj = AdaBoundW
-        
-    #     hyperp = {'lr': lr,
-    #               'weight_decay': opt_config.get('weight_decay', 0),
-    #               'betas': opt_config.get('betas', (0.9, 0.999)),
-    #               'eps': opt_config.get('eps', 1e-8),
-    #               'final_lr': opt_config.get('final_lr', 0.1)
-    #               }
-
-    # elif name == 'adabelief':
-    #     opt_obj = AdaBelief
-    #     hyperp = {'lr': lr,
-    #               'weight_decay': opt_config.get('weight_decay', 0),
-    #               'betas': opt_config.get('betas', (0.9, 0.999)),
-    #               'eps': opt_config.get('eps', 1e-16),
-    #               }
-        
-    # elif name == 'lion':
-    #     opt_obj = Lion
-    #     hyperp = {'lr': lr,
-    #               'weight_decay': opt_config.get('weight_decay', 0),
-    #               'betas': opt_config.get('betas', (0.9, 0.99)),
-    #               }
     else:
         raise KeyError(f"Unknown optimizer name {name}.")
         
