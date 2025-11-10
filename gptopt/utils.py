@@ -1,11 +1,51 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import random
 import yaml
 import hashlib
 import json
 import torch.distributed as dist
 import os
+from gptopt.optim.dap import LinearWithXtX
+
+def get_data_dir(dataset_name):
+    if dataset_name == 'slim_pajama1B':
+        return "/mnt/ceph/users/mcrawshaw/huggingface"
+    elif dataset_name == 'slim_pajama10B':
+        return "/mnt/ceph/users/nghosh/huggingface"
+    else:
+        return "/mnt/ceph/users/cmodi/huggingface"
+
+def set_xtx_mode(mod: torch.nn.Module, xtx_mode: bool):
+    for m in mod.modules():
+        if hasattr(m, "xtx_mode"):
+            setattr(m, "xtx_mode", xtx_mode)
+
+def swap_linears_for_xtx(mod: torch.nn.Module):
+    for name, child in list(mod.named_children()):
+        if isinstance(child, LinearWithXtX):
+            swap_linears_for_xtx(child)
+            continue
+
+        if isinstance(child, nn.Linear):
+            repl = LinearWithXtX(
+                child.in_features,
+                child.out_features,
+                bias=(child.bias is not None),
+                track_xtx=False,  # <- OFF by default; optimizer will enable per DAP layer
+            ).to(device=child.weight.device)
+            repl.train(child.training)
+
+            with torch.no_grad():
+                repl.weight.data = child.weight.detach().clone()
+                if child.bias is not None:
+                    repl.bias.data = child.bias.detach().clone()
+
+            setattr(mod, name, repl)
+            swap_linears_for_xtx(repl)
+        else:
+            swap_linears_for_xtx(child)
 
 # get worker info for distributed training
 def get_worker_info():

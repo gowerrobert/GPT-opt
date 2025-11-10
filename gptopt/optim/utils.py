@@ -6,6 +6,7 @@ from transformers import get_cosine_schedule_with_warmup
 from .momo import Momo
 from .momo_adam import MomoAdam
 from .muon import Muon
+from .dap import DAP
 from .sign_gd import SignGD
 # from .sps import SPS
 # from .adabound import AdaBoundW
@@ -62,7 +63,23 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'eps': opt_config.get('eps', 1e-8),
                   'fused': True
                   }
-    
+    elif name == 'nadam':
+        opt_obj = torch.optim.NAdam
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'momentum_decay': opt_config.get('momentum_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'eps': opt_config.get('eps', 1e-8),
+                  }
+    elif name == 'nadamw':
+        opt_obj = torch.optim.NAdam
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'momentum_decay': opt_config.get('momentum_decay', 0),
+                  'decoupled_weight_decay': opt_config.get('decoupled_weight_decay', True),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'eps': opt_config.get('eps', 1e-8),
+                  }
     elif name == 'adamw':
         opt_obj = torch.optim.AdamW
         hyperp = {'lr': lr,
@@ -112,6 +129,43 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'lb': opt_config.get('lb', 0.),
                   'divide': opt_config.get('divide', True),
                   'use_fstar': True
+                  }
+        
+    elif 'dap' in name:
+        opt_obj = DAP
+        scalar = opt_config.get('scalar', False) or 'scalar' in name
+        include_output = opt_config.get('include_output', False) or 'output' in name
+        include_embed = opt_config.get('include_embed', False) or 'embed' in name
+        use_ns_pinv = opt_config.get('use_ns_pinv', False) or 'ns' in name
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0.1),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'nesterov': opt_config.get('nesterov', False),
+                  'damping': opt_config.get('damping', 0.0),
+                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
+                  'adamw_eps': opt_config.get('eps', 1e-8),
+                  'ema_beta': opt_config.get('ema_beta', 0.0),
+                  'dap_beta1': opt_config.get('dap_beta1', 0),
+                  'dap_beta2': opt_config.get('dap_beta2', 0),
+                  'dap_eps': opt_config.get('dap_eps', 1e-8),
+                  'ns_pinv_steps': opt_config.get('ns_pinv_steps', 20),
+                  'rcond': opt_config.get('rcond', 1e-3),
+                  'use_bf16': opt_config.get('use_bf16', False),
+                  'use_fp64': opt_config.get('use_fp64', False),
+                  'debug_timing': opt_config.get('debug_timing', True),
+                  'use_ns_pinv': use_ns_pinv,
+                  'scalar': scalar,
+                  'disable_preconditioning': opt_config.get('disable_preconditioning', False),
+                  'include_output': include_output,
+                  'include_embed': include_embed,
+                  'refresh_precond_iters': opt_config.get('refresh_precond_iters', None),
+                  'accelerated': opt_config.get('accelerated', False),
+                  'spectral_norm_estimator': opt_config.get('spectral_norm_estimator', "power_method"),
+                  'xtx_subsample': opt_config.get('xtx_subsample', 1.0),
+                  'num_microbatches': opt_config.get('num_microbatches', None),
+                  'mb_subsampling': opt_config.get('mb_subsampling', False),
+                  'update_norm': opt_config.get('update_norm', False),
+                  'update_opnorm': opt_config.get('update_opnorm', False),
                   }
 
     elif 'muon' in name:

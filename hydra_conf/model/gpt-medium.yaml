@@ -1,0 +1,8 @@
+config:
+  n_embd: 1024    
+  n_layer: 24   
+  n_head: 16    
+  vocab_size: 50257
+  flash_attention: True
+
+name: gpt-medium

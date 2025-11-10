@@ -1,0 +1,21 @@
+optimizer_params:
+  name: dap-ns-nadam
+  lr: 0.0003
+  dap_beta1: 0.95
+  dap_beta2: 0.999
+  momentum: 0
+  weight_decay: 0.0
+  disable_preconditioning: False
+  scalar: False
+  ns_pinv_steps: 50
+  damping: 0
+  nesterov: True
+  lr_schedule: constant-linear
+  warm_up_fraction: 0.4
+  accelerated: 1e-3
+  rcond: 1e-3
+  xtx_subsample: null
+  mb_subsampling: True
+  debug_timing: False
+  update_norm: False
+  update_opnorm: False

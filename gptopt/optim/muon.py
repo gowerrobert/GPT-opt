@@ -299,7 +299,7 @@ class Muon(torch.optim.Optimizer):
             lr = group['lr']
             beta1, beta2 = group["adamw_betas"]
             eps = group["adamw_eps"]
-            weight_decay = group["wd"]
+            wd = group["wd"]
 
             for p in params:
                 g = p.grad
@@ -322,7 +322,7 @@ class Muon(torch.optim.Optimizer):
                 bias_correction1 = 1 - beta1**step
                 bias_correction2 = 1 - beta2**step
                 scale = bias_correction1 / bias_correction2**0.5
-                p.data.mul_(1 - lr * weight_decay)
+                p.data.mul_(1 - lr * wd)
                 p.data.add_(g, alpha=-lr / scale)
                     
         return loss

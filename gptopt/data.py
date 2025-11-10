@@ -54,4 +54,3 @@ def load_tiny_shakespeare(batch_size):
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
     return train_dataloader, test_dataloader
-

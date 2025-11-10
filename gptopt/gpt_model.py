@@ -70,9 +70,9 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_1 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -90,12 +90,13 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    no_layernorm: bool = False
+    flash_attention: bool = True
 
 class GPT(nn.Module):
 
-    def __init__(self, config, device, flash_attention=True):
+    def __init__(self, config, device):
         super().__init__()
-        config.flash_attention = flash_attention
         self.config = config
         self.device = device
        
@@ -103,7 +104,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([AttentionBlock(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
+            ln_f = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights
