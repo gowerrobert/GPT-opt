@@ -1,7 +1,7 @@
-0. Derive Muon updates for all four variations of LMO vs regularized, L2 product norm vs max product norm
-1. Implement four variations above
-2. Evaluate all variations with small scale experiment (1 epoch shakespeare data)
-3. Scale up?
+0. Fix validation loss on main, use the correct way of copying, avoid copying tensor
+1. Plotting should create a directory with name of config
+2. Figure out way of importing upto date LLM models
+3. move all data related code (process_data, process_sli_pajam10b) to a data directory
 
 Later:
 - Rotary positional embeddings
