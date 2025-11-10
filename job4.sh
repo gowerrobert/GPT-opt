@@ -17,4 +17,4 @@ export OMP_NUM_THREADS=1
 module load python
 source gptopt/bin/activate
 
-time torchrun --standalone --nproc_per_node=4 run.py --config configs/fineweb1B.yaml
+time torchrun --standalone --nproc_per_node=4 run.py configs/fineweb1B.yaml

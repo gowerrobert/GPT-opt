@@ -15,4 +15,4 @@ module load modules/2.3-20240529
 source /mnt/home/cmodi/envs/torchlatest/bin/activate
 
 #time torchrun run.py --config configs/finewebmini.yaml
-time python -u run_single.py --config configs/shakespeare.yaml
+time python -u run_single.py configs/shakespeare.yaml

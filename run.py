@@ -16,7 +16,8 @@ import os
 import wandb
 
 parser = argparse.ArgumentParser(description='Train GPT-2 with optional config file.')
-parser.add_argument('--config', type=str, help='Path to config file', default=None)
+parser.add_argument('config', type=str,  help='Path to config file', default=None)
+# parser.add_argument('--config', type=str, help='Path to config file', default=None)
 parser.add_argument('--suffix', type=str, help='Path to config file', default='')
 args = parser.parse_args()
 set_seed(42)

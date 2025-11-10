@@ -9,6 +9,7 @@ import json
 import os
 import numpy as np
 import matplotlib as mpl
+from pathlib import Path
 
 # Central style configuration
 def apply_style():
@@ -43,7 +44,7 @@ def load_outputs(output_dir):
     return outputs
 
 
-def plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, val=False):
+def plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, figdir, val=False):
     fig, ax = plt.subplots(figsize=(6, 4))
     methods = {}
 
@@ -94,17 +95,17 @@ def plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, val=Fals
     ax.set_xlabel('Learning Rate')
     if val:
         ax.set_ylabel('Final Validation Loss')
-        plotfile = 'figures/' + outfilename + '-lr-sens-val.pdf'
+        plotfile = figdir / (outfilename + '-lr-sens-val.pdf')
     else:
         ax.set_ylabel('Final Loss')
-        plotfile = 'figures/' + outfilename + '-lr-sens.pdf'
+        plotfile = figdir / (outfilename + '-lr-sens.pdf')
     ax.legend(loc='upper right')
     ax.grid(axis='both', lw=0.4, ls='--', zorder=0)
     fig.subplots_adjust(top=0.95, bottom=0.15, left=0.15, right=0.95)
     fig.savefig(plotfile, format='pdf', bbox_inches='tight')
 
 
-def plot_tuned_curves(outputs, colormap, linestylemap, outfilename, num_epochs, wallclock=False, val=False):
+def plot_tuned_curves(outputs, colormap, linestylemap, outfilename, num_epochs, figdir, wallclock=False, val=False):
     fig, ax = plt.subplots(figsize=(6, 4))
     tuned_methods = {}
 
@@ -143,14 +144,17 @@ def plot_tuned_curves(outputs, colormap, linestylemap, outfilename, num_epochs, 
         suffix += "_wallclock"
     if val:
         suffix += "_val"
-    fig.savefig("figures/" + outfilename + suffix + '.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(figdir / (outfilename + suffix + '.pdf'), format='pdf', bbox_inches='tight')
 
 
 def main(config_file=None):
     default_config = get_default_config()
     if config_file:
         config = load_config(default_config, config_file)
-    outfilename = config_file.replace("configs/", "").replace('.yaml', '')
+        outfilename = Path(config_file).name.replace('.yaml', '')
+    else:
+        outfilename = 'default'
+        config = default_config
     output_dir = f"gptopt/outputs/{outfilename}"
     outputs = load_outputs(output_dir)
 
@@ -166,8 +170,8 @@ def main(config_file=None):
         'iams-adam': '#1B75BC',
         'teacher': 'k',
         'sgd-schedulep': '#FF00FF',
-        'adamw-schedulep': '#8B008B',
-        'sgd-schedulefree': '#008000',
+        'momo-adam': '#8B008B',
+        'muon': '#008000',
         'adamw-schedulefree': '#006400',
     }
 
@@ -188,7 +192,7 @@ def main(config_file=None):
         'adamw-schedulefree': '--',
         'adamw-schedulep': '--',
         'muon-nonlmo-rms': None,
-        'muon-l2_prod-rms': None,
+        'momo-adam': None,
         'muon-nonlmo-l2_prod-rms': None,
         'sign-gd': None,
     }
@@ -203,12 +207,16 @@ def main(config_file=None):
             lr_ranges[name][0] = min(lr_ranges[name][0], lr)
             lr_ranges[name][1] = max(lr_ranges[name][1], lr)
 
+    # Create per-config figure directory
+    figdir = Path("figures") / outfilename
+    figdir.mkdir(parents=True, exist_ok=True)
+
     # Reset then re-apply thicker style
     mpl.rcParams.update(mpl.rcParamsDefault)
     apply_style()
 
-    plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename)
-    plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, val=True)
+    plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, figdir)
+    plot_final_loss_vs_lr(outputs, colormap, linestylemap, outfilename, figdir, val=True)
 
     initial_loss = outputs[0]['losses'][0] if outputs and 'losses' in outputs[0] else 1.0
     upper_bound = initial_loss * 1.2
@@ -220,7 +228,7 @@ def main(config_file=None):
     ax.set_ylim(lower_bound, upper_bound)
     ax.legend(loc='upper right')
     fig.subplots_adjust(top=0.99, bottom=0.155, left=0.12, right=0.99)
-    fig.savefig('figures/' + outfilename + '.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(figdir / (outfilename + '.pdf'), format='pdf', bbox_inches='tight')
 
     for method_subset in [['sgd-m', 'sgd-sch', 'iams', 'sgd-schedulep'],
                           ['adam', 'adam-sch', 'iams-adam', 'adamw-schedulep']]:
@@ -231,7 +239,7 @@ def main(config_file=None):
         ax.legend(loc='upper right')
         fig.subplots_adjust(top=0.935, bottom=0.03, left=0.155, right=0.99)
         name = '-lr' if 'sgd-m' in method_subset else '-lr-adam'
-        fig.savefig('figures/' + outfilename + name + '.pdf', format='pdf', bbox_inches='tight')
+        fig.savefig(figdir / (outfilename + name + '.pdf'), format='pdf', bbox_inches='tight')
 
     fig, ax = plt.subplots(figsize=(4.2, 3.2))
     plotted_methods = plot_step_size_and_lr(ax, outputs, colormap, linestylemap, lr_ranges, get_alpha_from_lr)
@@ -243,18 +251,21 @@ def main(config_file=None):
     ax.set_xlabel('Step')
     ax.set_ylabel('Learning Rate')
     fig.subplots_adjust(top=0.99, bottom=0.155, left=0.12, right=0.99)
-    fig.savefig('figures/' + outfilename + '-step_size-.pdf', format='pdf', bbox_inches='tight')
+    fig.savefig(figdir / (outfilename + '-step_size-.pdf'), format='pdf', bbox_inches='tight')
 
     plot_tuned_curves(outputs, colormap, linestylemap, outfilename,
-                      config['training_params']['num_epochs'], wallclock=False, val=False)
+                      config['training_params']['num_epochs'], figdir, wallclock=False, val=False)
     plot_tuned_curves(outputs, colormap, linestylemap, outfilename,
-                      config['training_params']['num_epochs'], wallclock=False, val=True)
+                      config['training_params']['num_epochs'], figdir, wallclock=False, val=True)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Plotting gpt_distill outputs.')
+    parser = argparse.ArgumentParser(description='Plotting gpt-opt outputs.')
     parser.add_argument('config', type=str, nargs='?', help='Path to config file', default=None)
     args = parser.parse_args()
+    # Keep base figures dir in case
+    Path("figures").mkdir(parents=True, exist_ok=True)
+
     if args.config:
         print(f"Loading configuration from {args.config}")
     else:

@@ -16,4 +16,4 @@ source /mnt/home/cmodi/envs/torchlatest/bin/activate
 module list 
 
 #time torchrun --standalone --nproc_per_node=1 run.py --config configs/finewebmini.yaml
-time torchrun --standalone --nproc_per_node=1 run.py --config configs/shakespeare.yaml
+time torchrun --standalone --nproc_per_node=1 run.py configs/shakespeare.yaml
