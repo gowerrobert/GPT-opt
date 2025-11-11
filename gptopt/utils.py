@@ -84,11 +84,10 @@ def merge_configs(default_config, user_config):
             merge_configs(value, user_config[key])
     return user_config
 
-def load_config(default_config, config_file):
+def load_config(config_file):
     with open(config_file, 'r') as file:
         config = yaml.safe_load(file)
-    return merge_configs(default_config, config)
-
+    return config
 
 
 def save_checkpoint(ckpt_dir, step, model, optimizer, loss, dataloader, scheduler=None, keep_last=2):

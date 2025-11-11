@@ -2,7 +2,7 @@ import yaml
 import argparse
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
-from gptopt.utils import get_default_config, load_config
+from gptopt.utils import load_config
 from gptopt.plot_utils import get_alpha_from_lr, percentage_of_epoch, plot_data, plot_step_size_and_lr, smoothen_dict
 import copy
 import json
@@ -148,13 +148,11 @@ def plot_tuned_curves(outputs, colormap, linestylemap, outfilename, num_epochs, 
 
 
 def main(config_file=None):
-    default_config = get_default_config()
     if config_file:
-        config = load_config(default_config, config_file)
+        config = load_config(config_file)
         outfilename = Path(config_file).name.replace('.yaml', '')
     else:
-        outfilename = 'default'
-        config = default_config
+        raise ValueError("config_file is required. Run: python plot.py <config.yaml>") 
     output_dir = f"gptopt/outputs/{outfilename}"
     outputs = load_outputs(output_dir)
 
