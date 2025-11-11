@@ -8,7 +8,7 @@ import torch
 import math
 import warnings
 
-@torch.compile  ## I had to comment this out, it was throwing an error
+# @torch.compile  
 def zeropower_via_newtonschulz5(G, steps):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -52,7 +52,7 @@ coeffs_list = [
 coeffs_list = [(a / 1.01, b / 1.01**3, c / 1.01**5)
                 for (a, b, c) in coeffs_list[:-1]] + [coeffs_list[-1]]
 
-@torch.compile
+# @torch.compile
 def PolarExpress(G: torch.Tensor, steps: int) -> torch.Tensor:
     assert G.ndim >= 2
     X = G.bfloat16()  # for speed

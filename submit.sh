@@ -1,31 +1,43 @@
 #!/bin/bash
+set -euo pipefail
 
-CONFIG_NAME=$(basename "$1" .yaml)
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <config.yaml> [num_gpus]"
+  exit 1
+fi
 
-mkdir -p output/slurm_logs
+CONFIG_FILE="$1"
+GPUS="${2:-4}"
+
+if ! [[ "$GPUS" =~ ^[0-9]+$ ]] || [[ "$GPUS" -lt 1 ]]; then
+  echo "Error: num_gpus must be a positive integer"
+  exit 1
+fi
+
+CONFIG_NAME=$(basename "$CONFIG_FILE" .yaml)
+mkdir -p slurm_logs
 
 sbatch <<EOF
 #!/bin/bash
 #SBATCH -J ${CONFIG_NAME}
-#SBATCH --gpus=1
+#SBATCH --gpus-per-node=${GPUS}
+# SBATCH --gpus=${GPUS}
 #SBATCH --cpus-per-gpu=8
-#SBATCH --time=60:00:00
+#SBATCH --time=100:00:00
+#SBATCH -C h100
+#SBATCH --mem=200G
+#SBATCH --nodes=1
 #SBATCH --partition=gpu
-#SBATCH --constraint=a100-40gb
-#SBATCH --exclude=workergpu027
-#SBATCH -o output/slurm_logs/${CONFIG_NAME}.log
-#SBATCH -e output/slurm_logs/${CONFIG_NAME}.err
+#SBATCH -o slurm_logs/${CONFIG_NAME}.log
 
-module load python
+export OMP_NUM_THREADS=1
 
 # Activate environment
 source venv/bin/activate
 
 # Install the necessary packages
-# python3 -m pip install -e .
-
-export PYTHONUNBUFFERED=1
+python -m pip install -e .
 
 # Run the Python script with the config file
-srun -u python -u run.py $1
+time torchrun --standalone --nproc_per_node=${GPUS} run.py  ${CONFIG_FILE}
 EOF

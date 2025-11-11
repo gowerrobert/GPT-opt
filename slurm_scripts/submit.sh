@@ -69,7 +69,7 @@ echo "New RUN_INFO_DIR: $RUN_INFO_DIR"
 
 # Generate task file with logging options
 echo "Generating task file..."
-python generate_task_file.py \
+python ./slurm_scripts/generate_task_file.py \
     --bash_script="$bash_script" \
     --param_file="$param_file" \
     --output_file="$task_file" \

@@ -1,9 +1,8 @@
 import torch
 from gptopt.train import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
-from gptopt.utils import hash_config, set_seed, get_worker_info, swap_linears_for_xtx
+from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir
 from gptopt.model import load_model
-from gptopt.data.data_utils import get_data_dir
 from gptopt.dataloader import ShardedDataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -92,19 +91,6 @@ def main(config : DictConfig):
     # Setup optimizer
     optimizer_obj, hyperp = get_optimizer(opt_config, lr=opt_config['lr'])
 
-    if opt_config.get('mb_subsampling', False) and opt_config.get('xtx_subsample', None):
-        xtx_rate = opt_config['xtx_subsample']
-        training_params['mb_subsampling'] = xtx_rate
-
-        if num_microbatches < 1 / xtx_rate:
-            opt_config['xtx_subsample'] = num_microbatches * xtx_rate
-        else:
-            opt_config['xtx_subsample'] = None
-    else:
-        training_params['mb_subsampling'] = None
-
-    if 'dap' in opt_name:
-        swap_linears_for_xtx(model_copy)
 
     if training_params['compile']:
         if master_process: print("Compiling model")
@@ -116,11 +102,7 @@ def main(config : DictConfig):
     
     p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
 
-    if 'dap' in opt_name:
-        hyperp['num_microbatches'] = num_microbatches
-        optimizer = optimizer_obj(model_copy, p, **hyperp)
-    else:
-        optimizer = optimizer_obj(p, **hyperp)
+    optimizer = optimizer_obj(p, **hyperp)
 
     scheduler = get_scheduler(opt_config, optimizer, total_iterations=total_iterations)
 

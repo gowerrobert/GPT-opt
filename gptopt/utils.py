@@ -7,7 +7,6 @@ import hashlib
 import json
 import torch.distributed as dist
 import os
-from gptopt.optim.dap import LinearWithXtX
 
 def get_data_dir(dataset_name):
     if dataset_name == 'slim_pajama1B':
@@ -17,35 +16,6 @@ def get_data_dir(dataset_name):
     else:
         return "/mnt/ceph/users/cmodi/huggingface"
 
-def set_xtx_mode(mod: torch.nn.Module, xtx_mode: bool):
-    for m in mod.modules():
-        if hasattr(m, "xtx_mode"):
-            setattr(m, "xtx_mode", xtx_mode)
-
-def swap_linears_for_xtx(mod: torch.nn.Module):
-    for name, child in list(mod.named_children()):
-        if isinstance(child, LinearWithXtX):
-            swap_linears_for_xtx(child)
-            continue
-
-        if isinstance(child, nn.Linear):
-            repl = LinearWithXtX(
-                child.in_features,
-                child.out_features,
-                bias=(child.bias is not None),
-                track_xtx=False,  # <- OFF by default; optimizer will enable per DAP layer
-            ).to(device=child.weight.device)
-            repl.train(child.training)
-
-            with torch.no_grad():
-                repl.weight.data = child.weight.detach().clone()
-                if child.bias is not None:
-                    repl.bias.data = child.bias.detach().clone()
-
-            setattr(mod, name, repl)
-            swap_linears_for_xtx(repl)
-        else:
-            swap_linears_for_xtx(child)
 
 # get worker info for distributed training
 def get_worker_info():
@@ -101,20 +71,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False  # May slow down training but ensures reproducibility
-
-# def compute_cross_entropy_loss(model, input_ids, attention_mask, labels):
-#     # Get model outputs
-#     outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-#     logits = outputs.logits  # Shape: [batch_size, sequence_length, vocab_size]
-#     # Shift the logits and labels for language modeling
-#     shift_logits = logits[:, :-1, :].contiguous()  # Remove the last token's logits
-#     shift_labels = labels[:, 1:].contiguous()      # Remove the first token in the labels
-    
-#     # Flatten the logits and labels for cross-entropy loss
-#     loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)  # Ignore padding token (assumes -100 for padding)
-#     loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-    
-#     return loss
 
 def get_outputfile_from_configfile(config_file):
     return 'gptopt/outputs/' + config_file.replace('configs/', '', 1).replace('.yaml', '', 1) + '.json'

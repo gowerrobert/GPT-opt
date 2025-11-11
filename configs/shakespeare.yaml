@@ -42,9 +42,9 @@ logging_params:
   
 
 gpt_model:
-  n_embd: 768    
-  n_layer: 12   
-  n_head: 12    
+  n_embd: 768    # Hidden size used in distilgpt2
+  n_layer: 4    # Number of layers in distilgpt2
+  n_head: 8    # Number of attention heads in distilgpt2
   vocab_size: 50257
   flash_attention: True
 
