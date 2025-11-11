@@ -13,9 +13,7 @@ Removing non hydra related code:
 - run_single, run
 
 Suspect code for removing:
-- train is not being used at all and is depreciated. Rename train_distributed -> train?
-- load_model_and_tokenizer and   (used only for dap). 
-- remove all dap related code:swap_linears_for_xtx, xtx_subsample, mb_subsampling.  It's very experimental
+- load_model_and_tokenizer and  load_model_huggingface and not being used anywhere
 
 Later:
 - Rotary positional embeddings
