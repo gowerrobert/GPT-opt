@@ -106,11 +106,3 @@ class ShardedDataLoader(IterableDataset):
             except StopIteration:
                 break  # End of epoch: exit the loop gracefully
             yield batch
-        
-    # def __next__(self):
-    #     try:
-    #         batch = self.next_batch()
-    #     except StopIteration:
-    #         break  # End of epoch: exit the loop gracefully
-    #     return batch
-        

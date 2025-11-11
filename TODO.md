@@ -4,12 +4,18 @@
 4. Why is the slurm_scripts/submit.sh so complex? What is project_config for?  
 5. Get rid of multiple copies of data handling files. Keep only process_data. 
 6. generate_task_file: Is used by slurm_scripts/submit.sh to generate multiple jobs on different GPUs, known as a tasks list.
-7. Clean up gpt-opt/utils.py no longer need default config. Move things to where they belong. Including data paths stuff!
-
+7. Clean up gpt-opt/utils.py no longer need default config. Move get_data_dir to some data_utils and things to where they belong. Including data paths stuff!
+8. Make very small test run, to see if code is broken
+9. Figure out exactly which load_data/data stuff is being used
+10. Currently only gpt_model is being used. Can we still plug in hugging face models if needed?
 
 Removing non hydra related code:
-- utils.py/get_default_config
 - run_single, run
+
+Suspect code for removing:
+- train is not being used at all and is depreciated. Rename train_distributed -> train?
+- load_model_and_tokenizer and   (used only for dap). 
+- remove all dap related code:swap_linears_for_xtx, xtx_subsample, mb_subsampling.  It's very experimental
 
 Later:
 - Rotary positional embeddings

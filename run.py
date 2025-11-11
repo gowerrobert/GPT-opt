@@ -2,7 +2,7 @@ import yaml
 import argparse
 import torch
 import matplotlib.pyplot as plt
-from gptopt.train_distributed import train
+from gptopt.train import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
 from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir, swap_linears_for_xtx
 #from gptopt.utils import get_default_config, load_config
