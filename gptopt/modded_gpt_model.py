@@ -1,237 +1,197 @@
-import math
-from dataclasses import dataclass
-from typing import Optional
+# Basically taken from Karpathy's llm.c repo
+# https://github.com/karpathy/llm.c/blob/master/train_gpt2.py
 import torch
-import torch.nn as nn
+from torch import  nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, GPT2LMHeadModel, GPT2Config
-
-# ====== Improvements: RMSNorm, SwiGLU, Rotary Embeddings (RoPE), Config flags ======
+from dataclasses import dataclass
+import math
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.pow(2).mean(-1, keepdim=True).clamp_min(self.eps).sqrt()
-        return (x / rms) * self.weight
+        # x / rms(x) * weight
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return x * rms * self.weight
 
-
-def build_rope_cache(seq_len: int, dim: int, base: int, device) -> tuple[torch.Tensor, torch.Tensor]:
-    half = dim // 2
-    freq = torch.arange(half, device=device, dtype=torch.float32) / half
-    inv_freq = base ** (-freq)
-    t = torch.arange(seq_len, device=device, dtype=torch.float32)
-    angles = torch.outer(t, inv_freq)  # (seq_len, half)
-    return torch.cos(angles), torch.sin(angles)
-
-
-def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x: (B, H, T, D)
-    B, H, T, D = x.shape
-    half = D // 2
-    x1 = x[..., :half]
-    x2 = x[..., half:half*2]
-    cos = cos[:T].unsqueeze(0).unsqueeze(0)  # (1,1,T,half)
-    sin = sin[:T].unsqueeze(0).unsqueeze(0)
-    rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-    return rotated
-
-
-class SwiGLU(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
-        super().__init__()
-        self.proj = nn.Linear(in_dim, 2 * hidden_dim)
-        self.out = nn.Linear(hidden_dim, in_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        a, b = self.proj(x).chunk(2, dim=-1)
-        return self.out(F.silu(a) * b)
-
-
-@dataclass
-class GPTConfig:
-    vocab_size: int = 50257
-    block_size: int = 1024
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.1
-    rope: bool = True             # Rotary positional embeddings
-    rope_base: int = 10000
-    swiglu: bool = True           # SwiGLU feed-forward
-    ff_mult: float = 4.0 / 3.0    # Effective expansion (PaLM style ~2.66x vs 4x)
-    no_layernorm: bool = False
-    flash_attention: bool = True  # Use SDPA (FlashAttention path)
-    tie_embeddings: bool = True
+class NewGELU(nn.Module):
+    """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
+    def forward(self, input):
+        return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig):
+
+    def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        self.config = config
-        self.n_head = config.n_head
-        self.head_dim = config.n_embd // config.n_head
-        assert self.head_dim % 2 == 0, "RoPE requires even head_dim"
+        # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        if not config.flash_attention:
-            self.register_buffer(
-                "mask",
-                torch.tril(torch.ones(config.block_size, config.block_size))
-                .view(1, 1, config.block_size, config.block_size)
-            )
-        self.rope_cache = None  # (cos, sin)
+        self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
+        # regularization
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.flash_attention = config.flash_attention
+        self.register_buffer("causal_mask", torch.tril(torch.ones(config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))
 
-    def maybe_init_rope(self, device):
-        if self.config.rope and self.rope_cache is None:
-            cos, sin = build_rope_cache(self.config.block_size, self.head_dim, self.config.rope_base, device)
-            self.rope_cache = (cos, sin)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.size()
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         qkv = self.c_attn(x)
-        q, k, v = qkv.split(C, dim=2)
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-
-        if self.config.rope:
-            self.maybe_init_rope(x.device)
-            cos, sin = self.rope_cache
-            q = apply_rope(q, cos, sin)
-            k = apply_rope(k, cos, sin)
-
-        if self.config.flash_attention:
-            y = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                is_causal=True
-            )
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        if self.flash_attention:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-            att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
-            att = torch.softmax(att, dim=-1)
-            att = F.dropout(att, p=self.config.dropout, training=self.training)
-            y = att @ v
-
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y)
-
+            # manual implementation of attention
+            # this materializes the large (T,T) matrix for all the queries and keys
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.causal_mask[:,:,:T,:T] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # output projection
+        y = self.c_proj(y)
+        return y
 
 class MLP(nn.Module):
-    def __init__(self, config: GPTConfig):
+
+    def __init__(self, config):
         super().__init__()
-        inner = int(config.n_embd * config.ff_mult)
-        if config.swiglu:
-            self.ff = SwiGLU(config.n_embd, inner)
-        else:
-            self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-            self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
-        self.dropout = nn.Dropout(config.dropout)
-        self.config = config
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu    = NewGELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.config.swiglu:
-            x = self.ff(x)
-        else:
-            x = self.c_fc(x)
-            x = F.gelu(x)
-            x = self.c_proj(x)
-        return self.dropout(x)
-
-
-class Block(nn.Module):
-    def __init__(self, config: GPTConfig):
-        super().__init__()
-        norm = RMSNorm if not config.no_layernorm else nn.Identity
-        self.ln1 = norm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
-        self.ln2 = norm(config.n_embd)
-        self.mlp = MLP(config)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
         return x
 
+class AttentionBlock(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+# -----------------------------------------------------------------------------
+# The main GPT-2 model
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50257
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    no_layernorm: bool = False
+    flash_attention: bool = True
 
 class GPT(nn.Module):
-    def __init__(self, config: GPTConfig, device):
+
+    def __init__(self, config, device):
         super().__init__()
         self.config = config
         self.device = device
-        self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        # Use position embedding only if not using RoPE
-        self.wpe = nn.Embedding(config.block_size, config.n_embd) if not config.rope else nn.Identity()
-        self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
-        norm = RMSNorm if not config.no_layernorm else nn.Identity
-        self.ln_f = norm(config.n_embd)
+       
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            h = nn.ModuleList([AttentionBlock(config) for _ in range(config.n_layer)]),
+            ln_f = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
+        ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        if config.tie_embeddings:
-            self.lm_head.weight = self.wte.weight  # weight tying
+        self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
-    def forward(self, idx: torch.Tensor, labels: Optional[torch.Tensor] = None, return_logits: bool = True):
-        # Match gpt_model.GPT API expected by train.py
-        B, T = idx.size()
-        assert T <= self.config.block_size, "Sequence length exceeds block_size"
-        tok = self.wte(idx)
-        if isinstance(self.wpe, nn.Embedding):
-            pos = torch.arange(0, T, device=idx.device)
-            pos_emb = self.wpe(pos).unsqueeze(0)
-            x = tok + pos_emb
-        else:
-            x = tok  # RoPE path
-        for block in self.h:
+        # init all weights, use a torch rng object to be very careful
+        self.init_rng = torch.Generator(device="cpu") #self.device)
+        self.init_rng.manual_seed(42)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            # apply special scaled init to the residual projections, per GPT-2 paper
+            std = 0.02 if not hasattr(module, 'LLMC_RESIDUAL_SCALE_FLAG') else 0.02/math.sqrt(2 * self.config.n_layer)
+            # we want to skip initializing lm_head, which shares parameters with wte
+            # and wte was already initialized down below during the Embedding init
+            if not hasattr(module, 'LLMC_SKIP_INIT'):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=std, generator=self.init_rng)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.init_rng)
+
+    def forward(self, idx, labels=None, return_logits=True):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
             x = block(x)
-        x = self.ln_f(x)
+        x = self.transformer.ln_f(x)
 
         if labels is not None:
+            # if we are given some desired labels also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
         else:
-            # Inference-time optimization: only last position logits
-            logits = self.lm_head(x[:, [-1], :])
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
+        # there are performance reasons why not returning logits is prudent, if not needed
         if not return_logits:
             logits = None
+
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: Optional[int] = None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
         for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
+            # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-        return idx
 
-# ====== Factory for modded GPT ======
-def build_gpt(config_dict, device):
-    cfg = GPTConfig(
-        vocab_size=config_dict.get("vocab_size", 50257),
-        block_size=config_dict.get("block_size", 1024),
-        n_layer=config_dict.get("n_layer", 12),
-        n_head=config_dict.get("n_head", 12),
-        n_embd=config_dict.get("n_embd", 768),
-        dropout=config_dict.get("dropout", 0.1),
-        rope=config_dict.get("rope", True),
-        rope_base=config_dict.get("rope_base", 10000),
-        swiglu=config_dict.get("swiglu", True),
-        ff_mult=config_dict.get("ff_mult", 4.0 / 3.0),
-        no_layernorm=config_dict.get("no_layernorm", False),
-        flash_attention=config_dict.get("flash_attention", True),
-        tie_embeddings=config_dict.get("tie_embeddings", True),
-    )
-    model = GPT(cfg).to(device)
-    return model
+        return idx

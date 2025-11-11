@@ -140,9 +140,7 @@ class Muon(torch.optim.Optimizer):
             else:
                 adamw_params.append(p)
                 adamw_params_names.append(name)
-        # print("EMBED TOKENS AND LM_HEAD SHOULD BE WITH ADAMW.")
-        # print("Params trained with MUON : ", muon_params_names)
-        # print("Params trained with ADAMW : ", adamw_params_names)
+
         params = list(muon_params)
         params.extend(adamw_params)
         super().__init__(params, defaults)
