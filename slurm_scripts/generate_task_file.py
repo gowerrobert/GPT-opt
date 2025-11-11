@@ -65,12 +65,13 @@ def generate_commands(bash_script: str, param_file: str, output_file: str, full_
     """
     # Parse the bash script for parameter names, default values, and their positions
     sorted_params = parse_bash_script(bash_script)
-
     # Load custom parameters from the JSON file
     with open(param_file, 'r') as file:
         custom_params = json.load(file)
 
     # Validate the parameters from the JSON file against the ones expected from the bash script
+    print("sorted_params:", sorted_params)
+    print("custom_params keys:", custom_params.keys())
     validate_params(sorted_params, custom_params.keys())
 
     # Merge default values with custom values from the JSON file

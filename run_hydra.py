@@ -40,7 +40,7 @@ def main(config : DictConfig):
     opt_config = config["optimizer"]["optimizer_params"]
     logging_config = config["logging"]["logging_params"]
     model_config = config["model"]["config"]
-
+    model_name = config["model"]["name"]
     # Logging
     outputname = HydraConfig.get().job.config_name
     # Save results into Hydra's run directory for this job
@@ -56,7 +56,7 @@ def main(config : DictConfig):
         if CKPT_DIR != "": os.makedirs(ckpt_dir_base, exist_ok=True)
 
     # Load model
-    model = load_model(model_config, device)
+    model = load_model(model_name, model_config, device)
     torch.set_float32_matmul_precision(training_params['tensorcore_precision'])
 
     # Load data

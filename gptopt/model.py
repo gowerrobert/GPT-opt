@@ -1,5 +1,7 @@
 from transformers import GPT2LMHeadModel, GPT2Config, AutoTokenizer, AutoModelForCausalLM
-from .gpt_model import GPT, GPTConfig
+from .gpt_model import GPT as BaseGPT, GPTConfig as BaseGPTConfig
+from .modded_gpt_model import GPT as ModGPT, GPTConfig as ModGPTConfig
+
 
 def load_model_and_tokenizer(config, device):
 
@@ -53,8 +55,15 @@ def load_model_huggingface(config, device):
     return model
 
 
-def load_model(config, device):
-    gptconfig = GPTConfig(**config)
-    model = GPT(gptconfig, device)
+def load_model(model_name, config, device):
+    if model_name == 'huggingface':
+        model = load_model_huggingface(config, device)
+    elif 'modded-gpt' in model_name:
+        gptconfig = ModGPTConfig(**config)
+        model = ModGPT(gptconfig, device)
+    else:
+        gptconfig = BaseGPTConfig(**config)
+        model = BaseGPT(gptconfig, device)
+
     return model
 
