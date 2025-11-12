@@ -4,6 +4,7 @@ import contextlib
 import torch.distributed as dist
 from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
 import json
+from gptopt.gpt_model import CausalSelfAttention
 
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
@@ -120,6 +121,16 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                         "train/step": opt_step,
                         "train/micro_step": step
                     }
+                    if getattr(model.config, "record_kq_max", False):
+                        base_model = getattr(model, "module", model)
+                        kq_max = None
+                        for m in base_model.modules():
+                            if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
+                                v = m.kq_max
+                                if kq_max is None or v > kq_max:
+                                    kq_max = v
+                        if kq_max is not None:
+                            wandb_log_dict["train/kq_max"] = kq_max
                     if hasattr(optimizer, 'step_size_list'):
                         wandb_log_dict["train/step_size_list"] = optimizer.step_size_list
                     for param_group_ix, param_group in enumerate(optimizer.param_groups):
@@ -171,14 +182,25 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 with open(ckpt_dir + '/log.json', 'w') as file:
                     json.dump(logger.__dict__, file)
         if master_process and wandb_run is not None:
-            wandb_run.log({
+            wandb_log_dict = {
                 "val/loss": val_loss.item(),
                 "val/step": opt_step,
                 "val/micro_step": step,
                 "train/loss": logger.losses[-1],
                 "train/step": opt_step,
                 "train/micro_step": step,
-            })
+            }
+            if getattr(model.config, "record_kq_max", False):
+                base_model = getattr(model, "module", model)
+                kq_max = None
+                for m in base_model.modules():
+                    if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
+                        v = m.kq_max
+                        if kq_max is None or v > kq_max:
+                            kq_max = v
+                if kq_max is not None:
+                    wandb_log_dict["val/kq_max"] = kq_max
+            wandb_run.log(wandb_log_dict)
 
     if hasattr(optimizer, 'step_size_list'):      # Check if optimizer has a step_size_list attribute
         logger.step_size_list = optimizer.step_size_list  

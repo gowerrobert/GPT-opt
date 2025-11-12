@@ -4,5 +4,6 @@ config:
   n_head: 12    
   vocab_size: 50257
   flash_attention: True
+  record_kq_max: True
 
 name: gpt-small

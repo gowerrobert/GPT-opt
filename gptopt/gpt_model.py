@@ -25,7 +25,8 @@ class CausalSelfAttention(nn.Module):
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.flash_attention = config.flash_attention
+        self.record_kq_max = config.record_kq_max
+        self.flash_attention = config.flash_attention and not self.record_kq_max
         self.register_buffer("causal_mask", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
 
@@ -44,6 +45,8 @@ class CausalSelfAttention(nn.Module):
             # this materializes the large (T,T) matrix for all the queries and keys
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.causal_mask[:,:,:T,:T] == 0, float('-inf'))
+            if self.record_kq_max:
+                self.kq_max = att.max().item()
             att = F.softmax(att, dim=-1)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
@@ -92,6 +95,9 @@ class GPTConfig:
     n_embd: int = 768
     no_layernorm: bool = False
     flash_attention: bool = True
+    record_kq_max: bool = True
+
+
 
 class GPT(nn.Module):
 

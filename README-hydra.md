@@ -359,7 +359,7 @@ python run_hydra.py \
 | Task | Command |
 |------|---------|
 | Run locally | `python run_hydra.py model=gpt-small optimizer=adamw data=shakespeare` |
-| Submit sweep | `./slurm_scripts/submit.sh scripts/run_*.sh params.json exp_name 8` |
+| Submit sweep | `./slurm_scripts/submit.sh scripts/run_*.sh params_config/params.json exp_name 8` |
 | Submit DDP | `./slurm_scripts/submit_nodes_ddp.sh scripts/run_*.sh params.json exp_name 4` |
 | Custom GPUs/partition | Add `--num_gpus=8 --partition=gpu --constraint=h100` |
 | Override param | `python run_hydra.py optimizer.optimizer_params.lr=0.001` |
