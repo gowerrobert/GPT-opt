@@ -6,11 +6,47 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 import math
 
-class NewGELU(nn.Module):
-    """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
-    def forward(self, input):
-        return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
+# --- RoPE utilities ---
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).reshape(x.shape)
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, base: float = 10000.0):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("cos_cached", None, persistent=False)
+        self.register_buffer("sin_cached", None, persistent=False)
+        self.cached_seq_len = 0
+
+    def get_embed(self, seq_len: int, device, dtype):
+        if self.cos_cached is None or self.cached_seq_len < seq_len:
+            t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+            freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # (T, dim/2)
+            emb = torch.cat((freqs, freqs), dim=-1)            # (T, dim)
+            cos = emb.cos()[None, None, :, :]                  # (1,1,T,dim)
+            sin = emb.sin()[None, None, :, :]                  # (1,1,T,dim)
+            self.cos_cached = cos
+            self.sin_cached = sin
+            self.cached_seq_len = seq_len
+        return (self.cos_cached[:, :, :seq_len, :].to(dtype=dtype, device=device),
+                self.sin_cached[:, :, :seq_len, :].to(dtype=dtype, device=device))
+
+def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # x: (B, H, T, D), cos/sin: (1,1,T,D)
+    return (x * cos) + (rotate_half(x) * sin)
+
+# Added: RMSNorm (LLaMA/Mistral)
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return x * rms * self.weight
 
 class CausalSelfAttention(nn.Module):
 
@@ -18,9 +54,9 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
         # regularization
         self.n_head = config.n_head
@@ -28,6 +64,10 @@ class CausalSelfAttention(nn.Module):
         self.flash_attention = config.flash_attention
         self.register_buffer("causal_mask", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
+        # RoPE
+        self.head_dim = config.n_embd // config.n_head
+        assert self.head_dim % 2 == 0, "RoPE requires even head_dim"
+        self.rope = RotaryEmbedding(self.head_dim, base=10000.0)
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -37,6 +77,12 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # apply RoPE to q,k
+        cos, sin = self.rope.get_embed(T, x.device, x.dtype)
+        q = apply_rotary_pos_emb(q, cos, sin)
+        k = apply_rotary_pos_emb(k, cos, sin)
+
         if self.flash_attention:
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
@@ -55,14 +101,18 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = NewGELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        # SwiGLU with 2/3 width of the 4x MLP (PaLM): inner = 8/3 * d_model
+        inner = int((4 * config.n_embd) * 2 / 3)
+        self.c_fc    = nn.Linear(config.n_embd, inner, bias=False)   # value path
+        self.c_gate  = nn.Linear(config.n_embd, inner, bias=False)   # gate path
+        self.act     = nn.SiLU()
+        self.c_proj  = nn.Linear(inner, config.n_embd, bias=False)
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
+        v = self.c_fc(x)
+        g = self.act(self.c_gate(x))
+        x = v * g
         x = self.c_proj(x)
         return x
 
@@ -70,9 +120,10 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        # Switched LayerNorm -> RMSNorm (fall back to Identity if disabled)
+        self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -104,7 +155,8 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([AttentionBlock(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
+            # Switched final LayerNorm -> RMSNorm
+            ln_f = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights
@@ -132,12 +184,12 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb
+        # Remove absolute positional embeddings; RoPE applied inside attention
+        x = tok_emb
 
         for block in self.transformer.h:
             x = block(x)
