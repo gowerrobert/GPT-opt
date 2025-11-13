@@ -41,7 +41,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
     master_process = (rank == 0)
     logger = Logging()
     optimizer_name = optimizer.__class__.__name__
-    if 'Momo' in optimizer_name:
+    if 'momo' in optimizer_name.lower() or 'nesgd' in optimizer_name.lower():
         pass_loss = True
     else:
         pass_loss = False

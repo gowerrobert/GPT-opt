@@ -34,7 +34,7 @@ def zeropower_via_newtonschulz5(G, steps):
     return X
 
 
-polar_express_coeffs_list = [
+coeffs_list = [
     (8.28721201814563, -23.595886519098837, 17.300387312530933),
     (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
     (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
@@ -45,6 +45,10 @@ polar_express_coeffs_list = [
     (1.875, -1.25, 0.375),
 ]
 
+# safety factor for numerical stability (but exclude last polynomial)
+coeffs_list = [(a / 1.01, b / 1.01**3, c / 1.01**5)
+                for (a, b, c) in coeffs_list[:-1]] + [coeffs_list[-1]]
+
 @torch.compile
 def PolarExpress(G: torch.Tensor, steps, frob_eps=1e-2, deflation_eps=1e-2):
     assert G.ndim >= 2, "Input tensor must have at least two dimensions."
@@ -54,7 +58,7 @@ def PolarExpress(G: torch.Tensor, steps, frob_eps=1e-2, deflation_eps=1e-2):
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * (1 + frob_eps))
 
-    hs = polar_express_coeffs_list[:steps] + list(repeat(polar_express_coeffs_list[-1], steps - len(polar_express_coeffs_list)))
+    hs = coeffs_list[:steps] + list(repeat(coeffs_list[-1], steps - len(coeffs_list)))
     for a, b, c in hs:
         a = a / (1 + deflation_eps)
         b = b / (1 + deflation_eps)

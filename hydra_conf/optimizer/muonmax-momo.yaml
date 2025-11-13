@@ -1,6 +1,6 @@
 optimizer_params:
-  name: muon
-  lr: 0.001
+  name: muonmax-momo
+  lr: 0.01
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4

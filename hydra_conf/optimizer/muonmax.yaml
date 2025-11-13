@@ -1,5 +1,5 @@
 optimizer_params:
-  name: muon
+  name: muonmax
   lr: 0.001
   weight_decay: 0
   lr_schedule: constant-linear
