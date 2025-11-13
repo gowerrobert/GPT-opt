@@ -8,7 +8,6 @@ import json
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
 class Logging():
-
     def __init__(self):
         self.losses = []
         self.val_losses = []
@@ -16,13 +15,11 @@ class Logging():
         self.grad_norms = []
         self.step_times = []
 
-
-
 def eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt):
     world_size, rank, local_rank, device  = get_worker_info()
     model.eval()
     val_loss, counter = 0., 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in val_dataloader:
             with autocast_ctxt:
                 output = model(input_ids=batch[0], labels=batch[1])
@@ -78,13 +75,12 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         loss_accum = 0.
         step = 1 if load_ckpt_step == 0 else int(load_ckpt_step)  # micro-step counter
         opt_step = 0 if load_ckpt_step == 0 else int(load_ckpt_step) // grad_accum_steps  # optimizer step counter
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         if step != 1 and master_process:
             print(train_dataloader.get_state())
             print(f"Resuming from micro_step={step}, opt_step={opt_step}")
         
         for batch in train_dataloader:
-                        
             with autocast_ctxt:
                 output = model(input_ids=batch[0], labels=batch[1])
                 loss = (output.loss if hasattr(output, "loss") else output[1])
@@ -104,7 +100,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                     optimizer.step(closure=None, loss=loss_accum)
                 else:
                     optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
                     

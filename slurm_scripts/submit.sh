@@ -96,13 +96,13 @@ if [ "$mode" = "NODES" ]; then
     #   - sbatch.sh currently pins 4 tasks per node.
     nodes="$count"
     total_tasks=$(( nodes * 4 ))
-    sbatch --partition="$partition" --nodes="$nodes" --ntasks="$total_tasks" --job-name="$group_name" slurm_scripts/sbatch.sh
+    sbatch --partition="$partition" --nodes="$nodes" --ntasks="$total_tasks" --job-name="$group_name" --exclusive slurm_scripts/sbatch.sh
 else
     # Default SPREAD mode (recommended):
     #   - Request <gpus> total tasks (1 GPU per task from sbatch.sh)
     #   - Allow SLURM to scatter across multiple nodes by overriding --nodes=1 with a range.
     gpus="$count"
-    sbatch --partition="$partition" --ntasks="$gpus" --job-name="$group_name" slurm_scripts/sbatch.sh
+    sbatch --partition="$partition" --ntasks="$gpus" --job-name="$group_name" --exclusive slurm_scripts/sbatch.sh
 fi
 echo "Job submitted. Check slurm logs for job status."
 

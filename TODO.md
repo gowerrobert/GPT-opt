@@ -14,7 +14,7 @@ Questions for Nikhil:
     
 
 Remove non hydra related code:
--  run
+-  run, submit.sh, README-no-hyrdra, configs. Update plot.py to find outputs in GPT-OPT/outputs
 
 Suspect code for removing:
 - load_model_and_tokenizer and  load_model_huggingface and not being used anywhere
