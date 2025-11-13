@@ -3,8 +3,6 @@ import math
 
 from .polar import zeropower_via_newtonschulz5, PolarExpress, SVDPolarFactor
 
-
-
 class LinftyNorm:
     def __init__(self):
         pass
