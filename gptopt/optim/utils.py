@@ -2,10 +2,13 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR, StepLR
 import warnings
 from typing import Tuple
+from math import sqrt
+
 from transformers import get_cosine_schedule_with_warmup
 from .momo import Momo
 from .momo_adam import MomoAdam
 from .muon import Muon
+from .nesgd import NESGD
 from .sign_gd import SignGD
 # from .sps import SPS
 # from .adabound import AdaBoundW
@@ -130,27 +133,120 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'use_fstar': True
                   }
 
-    elif 'muon' in name:
-        opt_obj = Muon
-        lmo = 'nonlmo' not in name
-        l2_prod_norm = 'l2_prod' in name
-        rms_layer_norm = 'rms' in name
-        if "nuc_fro" in name:
-            nuc_approx = "fro"
-        elif "nuc_past" in name:
-            nuc_approx = "past"
+    elif name == 'muon':
+        opt_obj = NESGD
+        lmo = True
+        prod_norm = "linfty"
+        embed_norm = "adam_infty"
+        truncate_loss = None
+
+        if "muon_lr_ratio" in opt_config or "muon_lr" in opt_config:
+            assert not ("muon_lr_ratio" in opt_config and "muon_lr" in opt_config)
+            if "muon_lr_ratio" in opt_config:
+                spectral_scale = opt_config["muon_lr_ratio"]
+            else:
+                spectral_scale = opt_config["muon_lr"] / lr
         else:
-            nuc_approx = None
+            spectral_scale = 1.0
+
         hyperp = {'lr': lr,
                   'wd': opt_config.get('weight_decay', 0),
-                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
                   'momentum': opt_config.get('momentum', 0.95),
-                  'nesterov': True,
                   'ns_steps': opt_config.get('ns_steps', 5),
                   'lmo': lmo,
-                  'l2_prod_norm': l2_prod_norm,
-                  'nuc_approx': nuc_approx,
-                  'rms_layer_norm': rms_layer_norm,
+                  'prod_norm': prod_norm,
+                  'spectral_scale': spectral_scale,
+                  'polar_method': opt_config.get('polar_method', "polar_express"),
+                  'embed_norm': embed_norm,
+                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
+                  'truncate_loss': truncate_loss,
+                  }
+
+    elif name == 'scion':
+        opt_obj = NESGD
+        lmo = True
+        prod_norm = "linfty"
+        embed_norm = "linfty"
+        truncate_loss = None
+
+        if "muon_lr_ratio" in opt_config or "muon_lr" in opt_config:
+            assert not ("muon_lr_ratio" in opt_config and "muon_lr" in opt_config)
+            if "muon_lr_ratio" in opt_config:
+                spectral_scale = opt_config["muon_lr_ratio"]
+            else:
+                spectral_scale = opt_config["muon_lr"] / lr
+        else:
+            spectral_scale = 1.0
+
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'ns_steps': opt_config.get('ns_steps', 5),
+                  'lmo': lmo,
+                  'prod_norm': prod_norm,
+                  'spectral_scale': spectral_scale,
+                  'polar_method': opt_config.get('polar_method', "polar_express"),
+                  'embed_norm': embed_norm,
+                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
+                  'truncate_loss': truncate_loss,
+                  }
+
+    elif name == 'muon-momo':
+        opt_obj = NESGD
+        lmo = True
+        prod_norm = "linfty"
+        embed_norm = "linfty"
+        truncate_loss = opt_config.get('truncate_loss', 3.2)
+
+        if "muon_lr_ratio" in opt_config or "muon_lr" in opt_config:
+            assert not ("muon_lr_ratio" in opt_config and "muon_lr" in opt_config)
+            if "muon_lr_ratio" in opt_config:
+                spectral_scale = opt_config["muon_lr_ratio"]
+            else:
+                spectral_scale = opt_config["muon_lr"] / lr
+        else:
+            spectral_scale = 1.0
+
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'ns_steps': opt_config.get('ns_steps', 5),
+                  'lmo': lmo,
+                  'prod_norm': prod_norm,
+                  'spectral_scale': spectral_scale,
+                  'polar_method': opt_config.get('polar_method', "polar_express"),
+                  'embed_norm': embed_norm,
+                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
+                  'truncate_loss': truncate_loss,
+                  }
+
+    elif name == 'muonmax-momo':
+        opt_obj = NESGD
+        lmo = False
+        prod_norm = "hybrid"
+        embed_norm = "adam_2"
+        truncate_loss = opt_config.get('truncate_loss', 3.2)
+
+        if "muon_lr_ratio" in opt_config or "muon_lr" in opt_config:
+            assert not ("muon_lr_ratio" in opt_config and "muon_lr" in opt_config)
+            if "muon_lr_ratio" in opt_config:
+                spectral_scale = sqrt(opt_config["muon_lr_ratio"])
+            else:
+                spectral_scale = sqrt(opt_config["muon_lr"] / lr)
+        else:
+            spectral_scale = 1.0
+
+        hyperp = {'lr': lr,
+                  'wd': opt_config.get('weight_decay', 0),
+                  'momentum': opt_config.get('momentum', 0.95),
+                  'ns_steps': opt_config.get('ns_steps', 5),
+                  'lmo': lmo,
+                  'prod_norm': prod_norm,
+                  'spectral_scale': spectral_scale,
+                  'polar_method': opt_config.get('polar_method', "polar_express"),
+                  'embed_norm': embed_norm,
+                  'adamw_betas': opt_config.get('betas', (0.95, 0.95)),
+                  'truncate_loss': truncate_loss,
                   }
 
     elif name == 'sign-gd':
