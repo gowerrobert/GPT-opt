@@ -19,14 +19,14 @@ class Logging():
 
 
 def eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt):
-
     world_size, rank, local_rank, device  = get_worker_info()
     model.eval()
     val_loss, counter = 0., 0
     with torch.no_grad():
         for batch in val_dataloader:
             with autocast_ctxt:
-                val_loss += model(batch[0], batch[1], return_logits=False)[1]
+                output = model(input_ids=batch[0], labels=batch[1])
+                val_loss += (output.loss if hasattr(output, "loss") else output[1])
             counter += 1
             if (val_accum_steps != 0) & (counter >= val_accum_steps): break
     # Avoid constructing a new tensor from a tensor; detach and move
@@ -86,7 +86,8 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         for batch in train_dataloader:
                         
             with autocast_ctxt:
-                loss = model(batch[0], batch[1], return_logits=False)[1]
+                output = model(input_ids=batch[0], labels=batch[1])
+                loss = (output.loss if hasattr(output, "loss") else output[1])
                 loss /= grad_accum_steps
 
             loss_accum += loss.detach()

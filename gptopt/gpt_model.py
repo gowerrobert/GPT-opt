@@ -144,6 +144,11 @@ class GPTConfig:
     no_layernorm: bool = False
     flash_attention: bool = True
 
+@dataclass
+class CausalLMOutput:
+    loss: torch.Tensor | None
+    logits: torch.Tensor
+
 class GPT(nn.Module):
 
     def __init__(self, config, device):
@@ -180,59 +185,58 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.init_rng)
 
-    def forward(self, idx, labels=None, return_logits=True):
+    def forward(self,
+                input_ids: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                labels: torch.Tensor | None = None,
+                **kwargs):
+        # HF-style API: input_ids instead of idx
+        idx = input_ids
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        # pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        # Remove absolute positional embeddings; RoPE applied inside attention
+        tok_emb = self.transformer.wte(idx)
         x = tok_emb
-
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
 
+        loss = None
         if labels is not None:
-            # if we are given some desired labels also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
+            if labels.dtype != torch.long:
+                labels = labels.long()
+            # Map user ignore_index -1 -> HF standard -100
+            if (labels == -1).any():
+                labels = labels.masked_fill(labels == -1, -100)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100
+            )
 
-        # there are performance reasons why not returning logits is prudent, if not needed
-        if not return_logits:
-            logits = None
-
-        return logits, loss
+        return CausalLMOutput(loss=loss, logits=logits)
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
+    def generate(self,
+                 input_ids: torch.Tensor,
+                 max_new_tokens: int,
+                 do_sample: bool = False,
+                 temperature: float = 1.0,
+                 top_k: int | None = None,
+                 **kwargs):
+        # HF-like generate (simplified, no beam/past key values)
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-
-        return idx
+            idx_cond = input_ids if input_ids.size(1) <= self.config.block_size else input_ids[:, -self.config.block_size:]
+            out = self(idx_cond)
+            logits = out.logits[:, -1, :] / temperature
+            if do_sample:
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float('Inf')
+                probs = F.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1)
+            else:
+                next_id = torch.argmax(logits, dim=-1, keepdim=True)
+            input_ids = torch.cat([input_ids, next_id], dim=1)
+        return input_ids

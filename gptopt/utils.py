@@ -8,14 +8,6 @@ import json
 import torch.distributed as dist
 import os
 
-def get_data_dir(dataset_name):
-    if dataset_name == 'slim_pajama1B':
-        return "/mnt/ceph/users/mcrawshaw/huggingface"
-    elif dataset_name == 'slim_pajama10B':
-        return "/mnt/ceph/users/nghosh/huggingface"
-    else:
-        return "/mnt/ceph/users/cmodi/huggingface"
-
 
 # get worker info for distributed training
 def get_worker_info():
