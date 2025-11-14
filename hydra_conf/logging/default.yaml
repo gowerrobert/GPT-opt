@@ -5,5 +5,5 @@ logging_params:
   save_ckpt_step: 512
   load_ckpt_step: 0
   keep_last: 2
-  ckpt_dir: ""
+  ckpt_dir: "outputs/checkpoints"
   results_dir: "dap_outputs/hydra-results/my_experiment"

@@ -33,16 +33,13 @@ def load_model_and_tokenizer(config, device):
     return model, tokenizer
 
 def load_model_huggingface(model_name, config, device):
-    # If explicit dims are provided, build a Qwen2MoeConfig directly
-    dim_keys = {'vocab_size','hidden_size','intermediate_size','num_hidden_layers','num_attention_heads','num_key_value_heads'}
-    
+    # Simplified: build Qwen2Moe directly from YAML fields, like tests/param_count_qwen.py
     if "Qwen2Moe" in model_name:
-        if dim_keys.issubset(config.keys()):
-            try:
-                from transformers import Qwen2MoeConfig
-            except Exception as e:
-                raise ImportError("Qwen2MoeConfig not available. Please upgrade transformers.") from e
-
+        try:
+            from transformers import Qwen2MoeConfig
+        except Exception as e:
+            raise ImportError("Qwen2MoeConfig not available. Please upgrade transformers.") from e
+        
             # Basic sanity checks
             hs = config['hidden_size']
             if hs % config['num_attention_heads'] != 0:
@@ -51,27 +48,21 @@ def load_model_huggingface(model_name, config, device):
                 raise ValueError("hidden_size must be divisible by num_key_value_heads")
 
             print(f"Random-initializing architecture for Qwen2Moe (custom config from Hydra: {model_name})")
-            model_config = Qwen2MoeConfig(
-                vocab_size=config['vocab_size'],
-                hidden_size=config['hidden_size'],
-                intermediate_size=config['intermediate_size'],
-                num_hidden_layers=config['num_hidden_layers'],
-                num_attention_heads=config['num_attention_heads'],
-                num_key_value_heads=config['num_key_value_heads'],
-            )
-            return AutoModelForCausalLM.from_config(model_config).to(device)
-    # Fallback: use a pretrained config name to construct architecture, random-init weights
-    else:
-        try:
-            print(f"Random-initializing architecture for {model_name}")
-            model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=hf.get('trust_remote_code', True))
-            return AutoModelForCausalLM.from_config(model_config).to(device)
+        model_config = Qwen2MoeConfig(**config)
+        return AutoModelForCausalLM.from_config(model_config).to(device)
 
-        except Exception as e:
-            print(f"Failed to load model {model_name} from pretrained configs: {e}")
+    # Fallback: use a pretrained config id (random init)
+    try:
+        trust = config.get('trust_remote_code', True) if isinstance(config, dict) else True
+        print(f"Random-initializing architecture for {model_name}")
+        model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust)
+        return AutoModelForCausalLM.from_config(model_config).to(device)
+    except Exception as e:
+        print(f"Failed to load model {model_name} from pretrained configs: {e}")
+        raise
 
 def load_model(model_name, config, device):
-    # import pdb; pdb.set_trace()
+
     if ('source' in config) and (config['source'] == 'huggingface'):
         model = load_model_huggingface(model_name, config, device)
     elif 'modded-gpt' in model_name:
