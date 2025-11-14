@@ -26,13 +26,33 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.record_kq_max = config.record_kq_max
+        self.kq_max = None
+        self.kq_max_h = None 
         self.flash_attention = config.flash_attention and not self.record_kq_max
+        # K^TQ blow up mitigation baselines
+        self.kq_layernorm = config.kq_layernorm
+        self.kq_logit_softcap = config.kq_logit_softcap
+        self.kq_weight_clip = config.kq_weight_clip
+        if self.kq_layernorm:
+            self.ln_k = nn.LayerNorm(self.n_embd // self.n_head, bias=False)
+            self.ln_q = nn.LayerNorm(self.n_embd // self.n_head, bias=False)
+
         self.register_buffer("causal_mask", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        if self.kq_weight_clip is not None and self.kq_max_h is not None:
+            # clip weights with gamma = min(1, c / self.kq_max_h) 
+            gamma = torch.minimum(torch.ones_like(self.kq_max_h), self.kq_weight_clip / self.kq_max_h)
+            W = self.c_attn.weight           # [3nemb, nemb]
+            a = gamma.sqrt().to(dtype=W.dtype, device=W.device).view(self.n_head, 1, 1)      # [nh]
+            with torch.no_grad(): 
+                # Q cols: [:n_embd], K cols: [n_embd:2*n_embd]; reshape to [nh, hs, nemb]
+                W[:self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
+                W[self.n_embd:2*self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
+
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -42,17 +62,27 @@ class CausalSelfAttention(nn.Module):
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
             # manual implementation of attention
+            if self.kq_layernorm:
+                q = self.ln_q(q)
+                k = self.ln_k(k)
             # this materializes the large (T,T) matrix for all the queries and keys
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if self.kq_logit_softcap is not None:
+                att = self.kq_logit_softcap * torch.tanh(att / self.kq_logit_softcap)
+            # causal mask
             att = att.masked_fill(self.causal_mask[:,:,:T,:T] == 0, float('-inf'))
+            # record max logit
             if self.record_kq_max:
                 self.kq_max = att.max().item()
+                if self.kq_weight_clip is not None:
+                    self.kq_max_h = att.amax(dim=(0, 2, 3), keepdim=False).detach().clamp_min(1e-12)
             att = F.softmax(att, dim=-1)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         return y
+    
 
 class MLP(nn.Module):
 
@@ -96,7 +126,9 @@ class GPTConfig:
     no_layernorm: bool = False
     flash_attention: bool = True
     record_kq_max: bool = True
-
+    kq_layernorm: bool = False
+    kq_logit_softcap: float = None # 50
+    kq_weight_clip: float = None # 100
 
 
 class GPT(nn.Module):

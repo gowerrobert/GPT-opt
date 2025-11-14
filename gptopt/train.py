@@ -16,6 +16,8 @@ class Logging():
         self.learning_rates = []
         self.grad_norms = []
         self.step_times = []
+        self.kq_max = []
+        self.val_kq_max = []
 
 
 
@@ -131,6 +133,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                                     kq_max = v
                         if kq_max is not None:
                             wandb_log_dict["train/kq_max"] = kq_max
+                            logger.kq_max.append(kq_max)
                     if hasattr(optimizer, 'step_size_list'):
                         wandb_log_dict["train/step_size_list"] = optimizer.step_size_list
                     for param_group_ix, param_group in enumerate(optimizer.param_groups):
@@ -174,7 +177,16 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         val_dataloader.reset()
         val_loss = eval_validation_loss(model, val_dataloader, 0, autocast_ctxt)
         logger.val_losses.append(val_loss.item())
-        print(f"In rank: {rank}, epoch {epoch+1}, Validation Loss: {val_loss.item()}")        
+        print(f"In rank: {rank}, epoch {epoch+1}, Validation Loss: {val_loss.item()}") 
+        if getattr(model.config, "record_kq_max", False):
+            base_model = getattr(model, "module", model)
+            kq_max = None
+            for m in base_model.modules():
+                if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
+                    v = m.kq_max
+                    if kq_max is None or v > kq_max:
+                        kq_max = v  
+                        logger.val_kq_max.append(kq_max)     
         if (ckpt_dir != ""):
             save_checkpoint(ckpt_dir, step, model, optimizer, logger.losses[-1],
                         train_dataloader, scheduler, logging_params['keep_last'])        
@@ -190,15 +202,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 "train/step": opt_step,
                 "train/micro_step": step,
             }
-            if getattr(model.config, "record_kq_max", False):
-                base_model = getattr(model, "module", model)
-                kq_max = None
-                for m in base_model.modules():
-                    if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
-                        v = m.kq_max
-                        if kq_max is None or v > kq_max:
-                            kq_max = v
-                if kq_max is not None:
+            if getattr(model.config, "record_kq_max", False) and kq_max is not None:
                     wandb_log_dict["val/kq_max"] = kq_max
             wandb_run.log(wandb_log_dict)
 
