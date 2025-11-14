@@ -23,7 +23,8 @@ mode=${5:-SPREAD}       # default to SPREAD
 mode=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
 
 # Choose partition via env var (default gpu). Example: PARTITION=eval ./submit.sh ...
-partition=${PARTITION:-gpu}
+partition=${PARTITION:-gpu}            # default 1 GPU per task
+gpu_constraint=${GPU_CONSTRAINT:-h100}          # e.g., h100, a100; empty = no constraint
 
 # Set up environment variables and directories
 LOG_DIR="${ROOT_DIR}/logs/${group_name}"
@@ -96,13 +97,13 @@ if [ "$mode" = "NODES" ]; then
     #   - sbatch.sh currently pins 4 tasks per node.
     nodes="$count"
     total_tasks=$(( nodes * 4 ))
-    sbatch --partition="$partition" --nodes="$nodes" --ntasks="$total_tasks" --job-name="$group_name" slurm_scripts/sbatch.sh
+    sbatch --partition="$partition" --nodes="$nodes" --ntasks="$total_tasks" ${gpu_constraint:+--constraint="$gpu_constraint"} --job-name="$group_name" slurm_scripts/sbatch.sh
 else
     # Default SPREAD mode (recommended):
     #   - Request <gpus> total tasks (1 GPU per task from sbatch.sh)
     #   - Allow SLURM to scatter across multiple nodes by overriding --nodes=1 with a range.
     gpus="$count"
-    sbatch --partition="$partition" --ntasks="$gpus" --job-name="$group_name" slurm_scripts/sbatch.sh
+    sbatch --partition="$partition" --ntasks="$gpus" ${gpu_constraint:+--constraint="$gpu_constraint"} --job-name="$group_name" slurm_scripts/sbatch.sh
 fi
 echo "Job submitted. Check slurm logs for job status."
 

@@ -1,0 +1,13 @@
+config:
+  n_embd: 768    
+  n_layer: 12   
+  n_head: 12    
+  vocab_size: 50257
+  flash_attention: True
+  record_kq_max: True
+  kq_layernorm: true
+  kq_logit_softcap: null # 50
+  kq_weight_clip: null # 100
+
+name: gpt-small
+kq_max_type: lnorm # softcap, lnorm, default, w-clip

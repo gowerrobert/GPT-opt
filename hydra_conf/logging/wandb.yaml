@@ -9,4 +9,4 @@ logging_params:
   results_dir: "dap_outputs/hydra-results/my_experiment"
   wandb:
     project: "dap"
-    name: ${model.name}_${data.dataset.name}_${optimizer.optimizer_params.name}_${paths.run_name}
+    name: ${model.name}_${model.kq_max_type}_${data.dataset.name}_${optimizer.optimizer_params.name}_${paths.run_name}
