@@ -12,7 +12,7 @@ For Monster Experiments
 2. Figure out how to plot outputs
 
 Remove non hydra related code:
--  run, submit.sh, README-no-hyrdra, configs. Update plot.py to find outputs in GPT-OPT/outputs
+-  Done
 
 Suspect code for removing:
 - load_model_and_tokenizer  
