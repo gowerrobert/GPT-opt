@@ -5,7 +5,7 @@ logging_params:
   save_ckpt_step: 500
   load_ckpt_step: 0
   keep_last: 2
-  ckpt_dir: "outputs/checkpoints"
+  ckpt_dir: ""
   results_dir: "outputs/hydra-results/my_experiment"
   wandb:
     project: "gpt-opy"

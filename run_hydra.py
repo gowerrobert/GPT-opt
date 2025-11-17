@@ -143,6 +143,8 @@ def main(config : DictConfig):
         logger.name = opt_config['name'] + '-lr-' + str(opt_config['lr'])
         if "muon_lr" in opt_config:
             logger.name += f"-muonlr-{opt_config['muon_lr']}"
+        if "muon_lr_ratio" in opt_config:
+            logger.name += f"-muonlr_ratio-{opt_config['muon_lr_ratio']}"
         if os.path.exists(output_path):
             print(f"File {output_path} already exists. Overwriting")
         with open(output_path, 'w') as file:

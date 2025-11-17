@@ -1,7 +1,0 @@
-optimizer_params:
-  name: muonmax
-  lr: 0.001
-  weight_decay: 0
-  lr_schedule: constant-linear
-  warm_up_fraction: 0.4
-  muon_lr: 0.01          # allow override
