@@ -5,21 +5,17 @@
 
 
 Questions for Nikhil:
-1. Confused about priority of configs. In the scripts we have:
-    lr=${1:-0.0001}
-    wd=${2:-0.0}
-    But this is already being set in the optimization config such as :
-    adamw.json
-    Is the learning rate 0.0001 from the script being used? Is it just a flag to say we should use lr?
+1.  
     
+For Monster Experiments
+1. Figure out how to set up automatic 2nd sweep, using the first sweep to set the ratio.
+2. Figure out how to plot outputs
 
 Remove non hydra related code:
--  run, submit.sh, README-no-hyrdra, configs. Update plot.py to find outputs in GPT-OPT/outputs
+-  Done
 
 Suspect code for removing:
-- load_model_and_tokenizer and  load_model_huggingface and not being used anywhere
+- load_model_and_tokenizer  
 
 Later:
-- Rotary positional embeddings
-- Implement MuonMax-Momo
 - How best to keep/intergrate param_configs and scripts for submitting multiple jobs

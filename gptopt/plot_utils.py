@@ -1,143 +1,166 @@
 import numpy as np
+from pathlib import Path
+import json
+import re
+
+# --- Data loading ------------------------------------------------------------
+
+HP_DIR_PATTERN = re.compile(r"^bs-(?P<bs>\d+)-lr-(?P<lr>[-+eE0-9\.]+)-wd-(?P<wd>[-+eE0-9\.]+)$")
+# Match "-muonlr-<float>" and capture only the numeric value (no trailing '-')
+MUON_LR_PATTERN = re.compile(
+    r"(?:^|-)muonlr-(?P<val>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)"
+)
+
+def load_outputs(root_dir: str):
+    """
+    Load all JSON logs from:
+        outputs/<model>/<data>/<method>/bs-<B>-lr-<LR>-wd-<WD>/*.json
+    Attaches method, batch_size, learning_rate, weight_decay to each output dict.
+    Assumes all directories follow this convention (no fallbacks).
+    """
+    base = Path(root_dir)
+    if not base.exists():
+        raise FileNotFoundError(f"{root_dir} does not exist")
+    outputs = []
+    for method_dir in base.iterdir():
+        if not method_dir.is_dir():
+            continue
+        method_name = method_dir.name
+        for hp_dir in method_dir.iterdir():
+            if not hp_dir.is_dir():
+                continue
+            m = HP_DIR_PATTERN.match(hp_dir.name)
+            if not m:
+                continue
+            bs = int(m.group("bs"))
+            lr = float(m.group("lr"))
+            wd = float(m.group("wd"))
+            for fp in hp_dir.glob("*.json"):
+                try:
+                    with fp.open("r") as f:
+                        out = json.load(f)
+                    out["method"] = method_name
+                    out["batch_size"] = bs
+                    out["learning_rate"] = lr
+                    out["weight_decay"] = wd
+                    out["filename"] = fp.name  # record the raw json filename
+                    m_mu = MUON_LR_PATTERN.search(fp.name)
+                    if m_mu:
+                        try:
+                            out["muon_lr"] = float(m_mu.group("val"))
+                        except ValueError:
+                            pass  # ignore parse errors silently
+                    outputs.append(out)
+                except Exception as e:
+                    print(f"Skipping {fp}: {e}")
+    return outputs
+
+# --- Plot helpers ------------------------------------------------------------
+
+def method_name(output):
+    return output["method"]  # always present by assumption
 
 def get_alpha_from_lr(lr, min_alpha=0.3, max_alpha=1.0, lr_range=None):
-    """Calculate alpha transparency based on the base learning rate."""
-    if lr_range and lr_range[0] == lr_range[1]:  # Single learning rate case
+    if lr_range and lr_range[0] == lr_range[1]:
         return max_alpha
     return min_alpha + (max_alpha - min_alpha) * (lr - lr_range[0]) / (lr_range[1] - lr_range[0])
 
 def percentage_of_epoch(output, field, num_epochs):
-    """Calculate the percentage of epochs for a given field."""
     total_iterations = len(output[field])
-    percentages = [i / total_iterations * num_epochs for i in range(total_iterations)]
-    return percentages
+    return [i / total_iterations * num_epochs for i in range(total_iterations)]
 
-def plot_data(ax, outputs, num_epochs, field, ylabel, colormap, linestylemap, lr_ranges, alpha_func, zorder_func=None, wallclock=False):
-    """Generalized function to plot data."""
-    plotted_methods = set()
-    for output in outputs:
-        name, lr = output['name'].split('-lr-')
-        lr = float(lr)
+def plot_data(ax, outputs, num_epochs, field, ylabel,
+              colormap, linestylemap, lr_ranges, alpha_func,
+              zorder_func=None, wallclock=False):
+    plotted = set()
+    for out in outputs:
+        name = method_name(out)
+        lr = out["learning_rate"]
+        if name not in lr_ranges:
+            continue
         alpha = alpha_func(lr, lr_range=lr_ranges[name])
-
         label = None
-        if name not in plotted_methods:
-            if lr_ranges[name][0] == lr_ranges[name][1]:  # Single learning rate
-                label = f"{name} lr={lr_ranges[name][0]:.4f}"
-            else:  # Range of learning rates
-                label = f"{name} lr in [{lr_ranges[name][0]:.4f}, {lr_ranges[name][1]:.4f}]"
-
+        if name not in plotted:
+            r0, r1 = lr_ranges[name]
+            label = f"{name} lr={r0:.4f}" if r0 == r1 else f"{name} lr in [{r0:.4f}, {r1:.4f}]"
         zorder = zorder_func(name) if zorder_func else 1
 
         if wallclock:
-            assert len(output["step_times"]) % len(output[field]) == 0
-            step_factor = len(output["step_times"]) // len(output[field])
-            step_times = np.array(output["step_times"])
-            step_times = np.sum(step_times.reshape((len(output[field]), step_factor)), axis=1)
+            assert len(out["step_times"]) % len(out[field]) == 0
+            step_factor = len(out["step_times"]) // len(out[field])
+            step_times = np.array(out["step_times"]).reshape(len(out[field]), step_factor).sum(axis=1)
             xs = np.cumsum(step_times)
+            xlabel = "Seconds"
         else:
-            xs = percentage_of_epoch(output, field, num_epochs=num_epochs)
+            xs = percentage_of_epoch(out, field, num_epochs)
+            xlabel = "Epochs"
 
         ax.plot(xs,
-                output[field],
+                out[field],
                 label=label,
                 color=colormap[name],
                 linewidth=2,
                 linestyle=linestylemap[name],
                 alpha=alpha,
                 zorder=zorder)
-        plotted_methods.add(name)
+        plotted.add(name)
 
-    xlabel = "Seconds" if wallclock else "Epochs"
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.grid(axis='both', lw=0.2, ls='--', zorder=0)
 
 def plot_step_size_and_lr(ax, outputs, colormap, linestylemap, lr_ranges, alpha_func):
-        """Generalized function to plot step_size_list and learning_rates."""
-        plotted_methods = set()
-        for output in outputs:
-            if 'step_size_list' not in output or 'learning_rates' not in output:
-                continue
+    plotted = set()
+    for out in outputs:
+        if 'step_size_list' not in out or 'learning_rates' not in out:
+            continue
+        name = method_name(out)
+        lr = out["learning_rate"]
+        if name not in lr_ranges:
+            continue
+        alpha = alpha_func(lr, lr_range=lr_ranges[name])
+        label = None
+        if name not in plotted:
+            r0, r1 = lr_ranges[name]
+            label = f"{name} lr={r0:.1e}" if r0 == r1 else f"{name} lr in [{r0:.1e}, {r1:.1e}]"
 
-            name, lr = output['name'].split('-lr-')
-            lr = float(lr)
-            alpha = alpha_func(lr, lr_range=lr_ranges[name])
+        ax.plot(range(len(out['step_size_list'])),
+                out['step_size_list'],
+                label=label,
+                color=colormap[name],
+                linewidth=2,
+                linestyle=linestylemap[name],
+                alpha=alpha)
+        ax.plot(range(len(out['learning_rates'])),
+                out['learning_rates'],
+                color=colormap[name],
+                linewidth=1.5,
+                linestyle='--',
+                alpha=alpha)
+        plotted.add(name)
+    return plotted
 
-            label = None
-            if name not in plotted_methods:
-                if lr_ranges[name][0] == lr_ranges[name][1]:
-                    label = f"{name} lr={lr_ranges[name][0]:.1e}"
-                else:
-                    label = f"{name} lr in [{lr_ranges[name][0]:.1e}, {lr_ranges[name][1]:.1e}]"
-
-            ax.plot(range(len(output['step_size_list'])),
-                    output['step_size_list'],
-                    label=label,
-                    color=colormap[name],
-                    linewidth=2,
-                    linestyle=linestylemap[name],
-                    alpha=alpha)
-
-            ax.plot(range(len(output['learning_rates'])),
-                    output['learning_rates'],
-                    color=colormap[name],
-                    linewidth=1.5,
-                    linestyle='--',
-                    alpha=alpha)
-
-            plotted_methods.add(name)
-
-        return plotted_methods
-
-
-## Plotting related functions
-def smoothen_curve_batch(data, num_points):
-    smooth_data =[data[0]]
-    t =0
-    data_av = 0.0
-    total_iterations = len(data)
-    av_interval = max(1, total_iterations // num_points)
-
-    for count, item in enumerate(data, start=0): 
-        data_av = data_av*t/(t+1) + item*(1/(t+1))
-        t = t+1
-        if count % av_interval == 0:
-            smooth_data.append(data_av)
-            data_av =0.0
-            t=0.0
-    return smooth_data
+# --- Smoothing ---------------------------------------------------------------
 
 def smoothen_curve_exp(data, num_points=None, beta=0.05):
-    smooth_data =[data[0]]
-    data_av = data[0]
-    total_iterations = len(data)
+    smooth = [data[0]]
+    acc = data[0]
+    total = len(data)
     if num_points is None:
-        num_points = total_iterations
-    av_interval = max(1, total_iterations // num_points)
-    for count, item in enumerate(data, start=0): 
-        if np.isnan(item):
+        num_points = total
+    interval = max(1, total // num_points)
+    for i, v in enumerate(data):
+        if np.isnan(v):
             continue
-        data_av = (1-beta)*data_av + beta*item
-        if count % av_interval == 0:
-            smooth_data.append(data_av)
-    return smooth_data
+        acc = (1 - beta) * acc + beta * v
+        if i % interval == 0:
+            smooth.append(acc)
+    return smooth
 
-def smoothen_dict(dict, num_points=None, beta= 0.05):
-    for key in dict.keys():
-        if key == 'losses':
-            dict[key] = smoothen_curve_exp(dict[key], num_points=None, beta = beta)
-        elif key == 'step_times':
-            if num_points is not None:
-                raise NotImplementedError("Plotting by wallclock time is not compatible with changing the number of plotted points through smoothing.")
-
-        """
-        Michael: Temporarily removing smoothing of step_size_list. smoothen_curve_exp is
-        breaking for Momo-Adam because it has two step sizes at each iteration.
-        """
-        # elif key == 'step_size_list':
-        #     dict[key] = smoothen_curve_exp(dict[key], len(dict[key]), beta = beta)
-
-        # dict[key] = smoothen_curve(dict[key], num_points)
+def smoothen_dict(d, num_points=None, beta=0.05):
+    if 'losses' in d:
+        d['losses'] = smoothen_curve_exp(d['losses'], num_points=None, beta=beta)
+    # step_times not smoothed (wallclock grouping assumption)
+    # step_size_list intentionally left untouched due to multi-value per iteration variants
 
 

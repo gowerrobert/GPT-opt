@@ -5,8 +5,8 @@ logging_params:
   save_ckpt_step: 500
   load_ckpt_step: 0
   keep_last: 2
-  ckpt_dir: ""  # "dap_outputs/checkpoints"
-  results_dir: "dap_outputs/hydra-results/my_experiment"
+  ckpt_dir: ""
+  results_dir: "outputs/hydra-results/my_experiment"
   wandb:
-    project: "dap"
+    project: "gpt-opy"
     name: ${model.name}_${data.dataset.name}_${optimizer.optimizer_params.name}_${paths.run_name}
