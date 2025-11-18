@@ -39,6 +39,7 @@ echo "group_name: $group_name"
 echo "count: $count"
 echo "mode: $mode"
 echo "partition: $partition"
+echo "constraint: ${constraint:-<none>}"
 
 # Create necessary directories
 mkdir -p "$RUN_INFO_DIR"

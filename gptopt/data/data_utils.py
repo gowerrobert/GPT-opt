@@ -5,7 +5,6 @@ from tqdm import tqdm
 from functools import partial
 
 
-
 def get_data_dir(dataset_name):
     if dataset_name == 'slim_pajama1B':
         return "/mnt/ceph/users/mcrawshaw/huggingface"

@@ -9,7 +9,6 @@ from gptopt.gpt_model import CausalSelfAttention
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
 class Logging():
-
     def __init__(self):
         self.losses = []
         self.val_losses = []
@@ -19,17 +18,15 @@ class Logging():
         self.kq_max = []
         self.val_kq_max = []
 
-
-
 def eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt):
-
     world_size, rank, local_rank, device  = get_worker_info()
     model.eval()
     val_loss, counter = 0., 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in val_dataloader:
             with autocast_ctxt:
-                val_loss += model(batch[0], batch[1], return_logits=False)[1]
+                output = model(input_ids=batch[0], labels=batch[1])
+                val_loss += (output.loss if hasattr(output, "loss") else output[1])
             counter += 1
             if (val_accum_steps != 0) & (counter >= val_accum_steps): break
     # Avoid constructing a new tensor from a tensor; detach and move
@@ -47,7 +44,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
     master_process = (rank == 0)
     logger = Logging()
     optimizer_name = optimizer.__class__.__name__
-    if 'Momo' in optimizer_name:
+    if 'momo' in optimizer_name.lower() or 'nesgd' in optimizer_name.lower():
         pass_loss = True
     else:
         pass_loss = False
@@ -81,15 +78,15 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         loss_accum = 0.
         step = 1 if load_ckpt_step == 0 else int(load_ckpt_step)  # micro-step counter
         opt_step = 0 if load_ckpt_step == 0 else int(load_ckpt_step) // grad_accum_steps  # optimizer step counter
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         if step != 1 and master_process:
             print(train_dataloader.get_state())
             print(f"Resuming from micro_step={step}, opt_step={opt_step}")
         
         for batch in train_dataloader:
-                        
             with autocast_ctxt:
-                loss = model(batch[0], batch[1], return_logits=False)[1]
+                output = model(input_ids=batch[0], labels=batch[1])
+                loss = (output.loss if hasattr(output, "loss") else output[1])
                 loss /= grad_accum_steps
 
             loss_accum += loss.detach()
@@ -106,7 +103,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                     optimizer.step(closure=None, loss=loss_accum)
                 else:
                     optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
                     

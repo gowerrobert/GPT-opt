@@ -8,4 +8,4 @@ python run_hydra.py \
     data=fineweb1B \
     optimizer.optimizer_params.lr=$lr \
     optimizer.optimizer_params.weight_decay=$wd \
-    model=modded-gpt-small 
+    model=modded-gpt-small

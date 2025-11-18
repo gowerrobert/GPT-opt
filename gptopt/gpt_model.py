@@ -6,11 +6,47 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 import math
 
-class NewGELU(nn.Module):
-    """Careful there are a few versions of GeLU, this one is the exact one used by OpenAI"""
-    def forward(self, input):
-        return 0.5 * input * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
+# --- RoPE utilities ---
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim=-1).reshape(x.shape)
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, base: float = 10000.0):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("cos_cached", None, persistent=False)
+        self.register_buffer("sin_cached", None, persistent=False)
+        self.cached_seq_len = 0
+
+    def get_embed(self, seq_len: int, device, dtype):
+        if self.cos_cached is None or self.cached_seq_len < seq_len:
+            t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+            freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # (T, dim/2)
+            emb = torch.cat((freqs, freqs), dim=-1)            # (T, dim)
+            cos = emb.cos()[None, None, :, :]                  # (1,1,T,dim)
+            sin = emb.sin()[None, None, :, :]                  # (1,1,T,dim)
+            self.cos_cached = cos
+            self.sin_cached = sin
+            self.cached_seq_len = seq_len
+        return (self.cos_cached[:, :, :seq_len, :].to(dtype=dtype, device=device),
+                self.sin_cached[:, :, :seq_len, :].to(dtype=dtype, device=device))
+
+def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # x: (B, H, T, D), cos/sin: (1,1,T,D)
+    return (x * cos) + (rotate_half(x) * sin)
+
+# Added: RMSNorm (LLaMA/Mistral)
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return x * rms * self.weight
 
 class CausalSelfAttention(nn.Module):
 
@@ -18,9 +54,9 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
         # regularization
         self.n_head = config.n_head
@@ -39,6 +75,10 @@ class CausalSelfAttention(nn.Module):
 
         self.register_buffer("causal_mask", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
+        # RoPE
+        self.head_dim = config.n_embd // config.n_head
+        assert self.head_dim % 2 == 0, "RoPE requires even head_dim"
+        self.rope = RotaryEmbedding(self.head_dim, base=10000.0)
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -58,6 +98,12 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # apply RoPE to q,k
+        cos, sin = self.rope.get_embed(T, x.device, x.dtype)
+        q = apply_rotary_pos_emb(q, cos, sin)
+        k = apply_rotary_pos_emb(k, cos, sin)
+
         if self.flash_attention:
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
@@ -88,14 +134,18 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = NewGELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        # SwiGLU with 2/3 width of the 4x MLP (PaLM): inner = 8/3 * d_model
+        inner = int((4 * config.n_embd) * 2 / 3)
+        self.c_fc    = nn.Linear(config.n_embd, inner, bias=False)   # value path
+        self.c_gate  = nn.Linear(config.n_embd, inner, bias=False)   # gate path
+        self.act     = nn.SiLU()
+        self.c_proj  = nn.Linear(inner, config.n_embd, bias=False)
         self.c_proj.LLMC_RESIDUAL_SCALE_FLAG = 1
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
+        v = self.c_fc(x)
+        g = self.act(self.c_gate(x))
+        x = v * g
         x = self.c_proj(x)
         return x
 
@@ -103,9 +153,10 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        # Switched LayerNorm -> RMSNorm (fall back to Identity if disabled)
+        self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -131,6 +182,11 @@ class GPTConfig:
     kq_weight_clip: float = None # 100
 
 
+@dataclass
+class CausalLMOutput:
+    loss: torch.Tensor | None
+    logits: torch.Tensor
+
 class GPT(nn.Module):
 
     def __init__(self, config, device):
@@ -142,7 +198,8 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([AttentionBlock(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
+            # Switched final LayerNorm -> RMSNorm
+            ln_f = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights
@@ -166,59 +223,58 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.init_rng)
 
-    def forward(self, idx, labels=None, return_logits=True):
+    def forward(self,
+                input_ids: torch.Tensor,
+                attention_mask: torch.Tensor | None = None,
+                labels: torch.Tensor | None = None,
+                **kwargs):
+        # HF-style API: input_ids instead of idx
+        idx = input_ids
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = tok_emb + pos_emb
-
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
 
+        loss = None
         if labels is not None:
-            # if we are given some desired labels also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
+            if labels.dtype != torch.long:
+                labels = labels.long()
+            # Map user ignore_index -1 -> HF standard -100
+            if (labels == -1).any():
+                labels = labels.masked_fill(labels == -1, -100)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100
+            )
 
-        # there are performance reasons why not returning logits is prudent, if not needed
-        if not return_logits:
-            logits = None
-
-        return logits, loss
+        return CausalLMOutput(loss=loss, logits=logits)
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
+    def generate(self,
+                 input_ids: torch.Tensor,
+                 max_new_tokens: int,
+                 do_sample: bool = False,
+                 temperature: float = 1.0,
+                 top_k: int | None = None,
+                 **kwargs):
+        # HF-like generate (simplified, no beam/past key values)
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
-
-        return idx
+            idx_cond = input_ids if input_ids.size(1) <= self.config.block_size else input_ids[:, -self.config.block_size:]
+            out = self(idx_cond)
+            logits = out.logits[:, -1, :] / temperature
+            if do_sample:
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float('Inf')
+                probs = F.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1)
+            else:
+                next_id = torch.argmax(logits, dim=-1, keepdim=True)
+            input_ids = torch.cat([input_ids, next_id], dim=1)
+        return input_ids

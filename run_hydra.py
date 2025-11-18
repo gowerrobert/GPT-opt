@@ -1,8 +1,9 @@
 import torch
 from gptopt.train import train
 from gptopt.optim.utils import get_scheduler, get_optimizer
-from gptopt.utils import hash_config, set_seed, get_worker_info, get_data_dir
+from gptopt.utils import hash_config, set_seed, get_worker_info
 from gptopt.model import load_model
+from gptopt.data.data_utils import get_data_dir
 from gptopt.dataloader import ShardedDataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -81,7 +82,10 @@ def main(config : DictConfig):
         
     # Generate hash for the current optimizer configuration
     config_hash = hash_config(OmegaConf.to_container(opt_config), OmegaConf.to_container(training_params), OmegaConf.to_container(model_config))
-    file_name = f"{opt_config['name']}-lr-{opt_config['lr']}-{opt_config['lr_schedule']}-{config_hash}-world{world_size}"
+    file_name = f"{opt_config['name']}-lr-{opt_config['lr']}-{opt_config['lr_schedule']}"
+    if 'muon_lr' in opt_config:
+        file_name += f"-muonlr-{opt_config['muon_lr']}"
+    file_name += f"-{config_hash}"
     output_path = os.path.join(output_dir, file_name + '.json')
     ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
     
@@ -100,7 +104,7 @@ def main(config : DictConfig):
         model_copy = DDP(model_copy, device_ids=[local_rank])
     
     
-    p = model_copy.named_parameters() if ('muon' in opt_name or 'dap' in opt_name) else model_copy.parameters()
+    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name) else model_copy.parameters()
 
     optimizer = optimizer_obj(p, **hyperp)
 
@@ -137,6 +141,10 @@ def main(config : DictConfig):
     # Save
     if master_process:
         logger.name = opt_config['name'] + '-lr-' + str(opt_config['lr'])
+        if "muon_lr" in opt_config:
+            logger.name += f"-muonlr-{opt_config['muon_lr']}"
+        if "muon_lr_ratio" in opt_config:
+            logger.name += f"-muonlr_ratio-{opt_config['muon_lr_ratio']}"
         if os.path.exists(output_path):
             print(f"File {output_path} already exists. Overwriting")
         with open(output_path, 'w') as file:

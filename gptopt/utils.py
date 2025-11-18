@@ -8,15 +8,6 @@ import json
 import torch.distributed as dist
 import os
 
-def get_data_dir(dataset_name):
-    if dataset_name == 'slim_pajama1B':
-        return "/mnt/ceph/users/mcrawshaw/huggingface"
-    elif dataset_name == 'slim_pajama10B':
-        return "/mnt/ceph/users/nghosh/huggingface"
-    else:
-        return "/mnt/ceph/users/cmodi/huggingface"
-
-
 # get worker info for distributed training
 def get_worker_info():
     if dist.is_initialized():
@@ -90,17 +81,29 @@ def load_config(config_file):
     return config
 
 
+# ...existing code...
 def save_checkpoint(ckpt_dir, step, model, optimizer, loss, dataloader, scheduler=None, keep_last=2):
     world_size = dataloader.world_size
     master_process = (dataloader.rank == 0)
+
+    # Get optimizer state and drop non-picklable callables from param_groups
+    opt_state = optimizer.state_dict()
+    try:
+        for g in opt_state.get('param_groups', []):
+            for k in list(g.keys()):
+                if callable(g[k]):
+                    del g[k]
+    except Exception:
+        pass
     checkpoint = {
         'step': step,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        'optimizer_state_dict': opt_state,
         'loss': loss,
-        }
+    }
     if scheduler is not None:
         checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+    # ...existing code...
     
     # Gather dataloader from all ranks and save it.
     if world_size > 1:
