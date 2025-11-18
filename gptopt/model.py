@@ -4,33 +4,32 @@ from .modded_gpt_model import GPT as ModGPT, GPTConfig as ModGPTConfig
 import torch.nn as nn
 import torch
 
-def load_model_and_tokenizer(config, device):
-    # Always random init weights
-    if 'model_name' in config['gpt_model']:
-        hf = config['gpt_model']
-        print(f"Random-initializing architecture for {hf['model_name']}")
-        model_config = AutoConfig.from_pretrained(hf['model_name'], trust_remote_code=hf.get('trust_remote_code', False))
-        model = AutoModelForCausalLM.from_config(model_config).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(hf['model_name'], trust_remote_code=hf.get('trust_remote_code', False))
-        model = HuggingFaceCausalLMAdapter(model)
-    else:
-        g = config['gpt_model']
-        model_config = GPT2Config(
-            n_embd=g['n_embd'],
-            n_layer=g['n_layer'],
-            n_head=g['n_head'],
-            vocab_size=g['vocab_size'],
-        )
-        model = GPT2LMHeadModel(model_config).to(device)
-        model = HuggingFaceCausalLMAdapter(model)  # Wrap for API consistency
-        print("Loading gpt2 tokenizer as default tokenizer\n")
-        tokenizer = AutoTokenizer.from_pretrained(g.get('gpt2', 'gpt2'))
-    # Ensure tokenizer has a pad token and propagate to HF model config so attention_mask can be built
-    if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    if isinstance(model, HuggingFaceCausalLMAdapter) and getattr(model.hf_model.config, "pad_token_id", None) is None:
-        model.hf_model.config.pad_token_id = tokenizer.pad_token_id
-    return model, tokenizer
+## Rob: Currently not being used, and would need to be merged with the load_model_huggingface function below.
+# def load_model_and_tokenizer(config, device):
+#     # Always random init weights
+#     if 'model_name' in config['gpt_model']:
+#         hf = config['gpt_model']
+#         print(f"Random-initializing architecture for {hf['model_name']}")
+#         model_config = AutoConfig.from_pretrained(hf['model_name'], trust_remote_code=hf.get('trust_remote_code', False))
+#         model = AutoModelForCausalLM.from_config(model_config).to(device)
+#         tokenizer = AutoTokenizer.from_pretrained(hf['model_name'], trust_remote_code=hf.get('trust_remote_code', False))
+#     else:
+#         g = config['gpt_model']
+#         model_config = GPT2Config(
+#             n_embd=g['n_embd'],
+#             n_layer=g['n_layer'],
+#             n_head=g['n_head'],
+#             vocab_size=g['vocab_size'],
+#         )
+#         model = GPT2LMHeadModel(model_config).to(device)
+#         print("Loading gpt2 tokenizer as default tokenizer\n")
+#         tokenizer = AutoTokenizer.from_pretrained(g.get('gpt2', 'gpt2'))
+#     # Ensure tokenizer has a pad token and propagate to HF model config so attention_mask can be built
+#     if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
+#         tokenizer.pad_token = tokenizer.eos_token
+#     if isinstance(model, HuggingFaceCausalLMAdapter) and getattr(model.hf_model.config, "pad_token_id", None) is None:
+#         model.hf_model.config.pad_token_id = tokenizer.pad_token_id
+#     return model, tokenizer
 
 def load_model_huggingface(model_name, config, device):
     # Simplified: build Qwen2Moe directly from YAML fields, like tests/param_count_qwen.py

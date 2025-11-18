@@ -2,6 +2,7 @@ config:
   vocab_size: 50257
   hidden_size: 768
   num_hidden_layers: 16
+  intermediate_size: 3072
   # 64-d heads
   num_attention_heads: 12
   num_key_value_heads: 12
