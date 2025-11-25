@@ -10,6 +10,7 @@ from .momo_adam import MomoAdam
 from .muon import Muon
 from .nesgd import NESGD
 from .sign_gd import SignGD
+from .pdhg import AttnPDHGAdamW
 # from .sps import SPS
 # from .adabound import AdaBoundW
 # from .adabelief import AdaBelief
@@ -267,6 +268,14 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'lmo': False
                   }
 
+    elif name == "attn_pdhg_adamw":
+        opt_obj = AttnPDHGAdamW
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)), 
+                  'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
+                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500)
+                  }
     else:
         raise KeyError(f"Unknown optimizer name {name}.")
         

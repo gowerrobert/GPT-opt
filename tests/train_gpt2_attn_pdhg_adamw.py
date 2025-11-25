@@ -24,7 +24,8 @@ from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
 OmegaConf.register_new_resolver("div", lambda x, y: x // y)
 
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
-from pdhg import pdhg_method_AB, prox_l1, AttnPDHGAdamW
+from gptopt.optim.pdhg import pdhg_method_AB, prox_l1, check_dual_feasible, AttnPDHGAdamW
+
 
 
 def train(train_dataloader, val_dataloader, model, optimizer, training_params, logging_params, scheduler=None, ckpt_dir="", wandb_run=None):

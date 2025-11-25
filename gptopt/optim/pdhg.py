@@ -1,6 +1,7 @@
 
 import torch
 from torch.optim import Optimizer
+import numpy as np
 
 
 
@@ -19,6 +20,8 @@ class AttnPDHGAdamW(Optimizer):
         weight_decay=0.01,
         qk_lr_scale=1.0,
         max_norm_tr=1,
+        pdhg_max_iter=500,
+        pdhg_momentum=False
     ):
         params = []
         self.name_by_param = {}
@@ -35,6 +38,8 @@ class AttnPDHGAdamW(Optimizer):
             weight_decay=weight_decay,
             qk_lr_scale=qk_lr_scale,
             max_norm_tr=max_norm_tr,
+            pdhg_max_iter=pdhg_max_iter, 
+            pdhg_momentum=pdhg_momentum
         )
         super().__init__(params, defaults)
 
@@ -57,8 +62,10 @@ class AttnPDHGAdamW(Optimizer):
             eps = group["eps"]
             wd = group["weight_decay"]
             qk_lr_scale = group["qk_lr_scale"]
+            pdhg_max_iter = group["pdhg_max_iter"]
+            momentum = group["pdhg_momentum"]
 
-            for p in group["params"]:
+            for p in group["params"]:   
                 g = p.grad
                 if g is None:
                     continue
@@ -74,6 +81,14 @@ class AttnPDHGAdamW(Optimizer):
                 bias_correction1 = 1 - beta1**step
                 bias_correction2 = 1 - beta2**step
                 scale = bias_correction1 / bias_correction2**0.5
+
+                if momentum:
+                    buf1 = state["moment1"]
+                    buf2 = state["moment2"]
+                    buf1.lerp_(g, 1 - beta1)
+                    buf2.lerp_(g.square(), 1 - beta2)
+                    
+                    g = buf1 / (eps + buf2.sqrt())
 
                 name = self.name_by_param[p]
                 updated.add(name) 
@@ -104,14 +119,15 @@ class AttnPDHGAdamW(Optimizer):
                         W_q=W_q,
                         G_wk=G_k,
                         G_wq=G_q,
-                        max_iter=500,
+                        max_iter=pdhg_max_iter,
                         lamb_max=lamb_max,
                         mu=mu_reg,
                         eps_abs=1e-6,
                         eps_rel=1e-12,
                         stopping=False,
                         min_iter=500,
-                        # Y0=Y0
+                        Z1_0=-G_k, 
+                        Z2_0=-G_q
                     )
                     
                     W_k.data.copy_(Z1_t)
@@ -131,12 +147,13 @@ class AttnPDHGAdamW(Optimizer):
                     W_v.data.mul_(1 - lr * wd)
                     W_v.data.add_(G_v, alpha=-lr / scale)
                 else:
-                    buf1 = state["moment1"]
-                    buf2 = state["moment2"]
-                    buf1.lerp_(g, 1 - beta1)
-                    buf2.lerp_(g.square(), 1 - beta2)
-                    
-                    g = buf1 / (eps + buf2.sqrt())
+                    if not momentum:
+                        buf1 = state["moment1"]
+                        buf2 = state["moment2"]
+                        buf1.lerp_(g, 1 - beta1)
+                        buf2.lerp_(g.square(), 1 - beta2)
+                        
+                        g = buf1 / (eps + buf2.sqrt())
                     p.data.mul_(1 - lr * wd)
                     p.data.add_(g, alpha=-lr / scale)
 
@@ -151,12 +168,18 @@ class AttnPDHGAdamW(Optimizer):
         assert not missing, f"[AttnPDHGAdamW] Params with grad but no update: {missing}"
 
         return loss, residuals_n_layers
+        # return loss
 
 
 
-def prox_l1(x, rho):
-    # proximal operator for l1 norm rho * ||x||_1
-    return torch.sign(x) * torch.clamp(torch.abs(x) - rho, min=0.0)
+def prox_l1(x, beta, R=None):
+    # soft-thresholding
+    # proximal operator for l1 norm beta * ||x||_1
+    if R is not None:
+        threshold = beta * R
+    else:
+        threshold = beta
+    return torch.sign(x) * torch.clamp(torch.abs(x) - threshold, min=0.0)
 
 
 
@@ -174,7 +197,14 @@ def pdhg_method_AB(
     stopping: bool = False,
     min_iter: int = 10,
     Y0: torch.Tensor | None = None,
-):
+    theta: float = 1.0,
+    acceleration: bool = False,
+    Z1_0: torch.Tensor | None = None,
+    Z2_0: torch.Tensor | None = None,
+    diag_scaling: bool = False,
+    h_conj= None,
+    f_star: float | None = None,
+    ):
     use_Z2 = not ((W_k is None) or (G_wq is None) ) 
     if lamb_max is None:
         nA = torch.linalg.norm(W_q, ord="fro").item()
@@ -184,50 +214,64 @@ def pdhg_method_AB(
         else:
             lamb_max = nA
         print(f"{lamb_max=}")
-    rho = gamma = 0.99 / lamb_max
+    rho = gamma = max(min(0.99 / (lamb_max + 1e-12), 1e4), 1e-5)
     m, n = W_q.shape
-    residuals = {"r1": [], "r2": [], "r1_rel": [], "r2_rel": []}
+    residuals = {"r1": [], "r2": [], "r1_rel": [], "r2_rel": [], "dual_vals":[], "rel_gap":[]}
  
-    Z1 = torch.zeros_like(G_wk)
+    if Z1_0 is not None:
+        Z1 = Z1_0
+    else:
+        Z1 = torch.zeros_like(G_wk)
     Z1_bar = Z1.clone()
     if Y0 is not None:
         Y = Y0
     else:
         Y = torch.zeros((Z1.shape[1], W_q.shape[1]), device=G_wk.device, dtype=G_wk.dtype)
     if use_Z2:
-        Z2 = torch.zeros_like(G_wq) 
+        if Z2_0 is not None:
+            Z2 = Z2_0
+        else:
+            Z2 = torch.zeros_like(G_wq) 
         Z2_bar = Z2.clone()
         Z_total_size = Z1.numel() + Z2.numel()
     else:
         Z2 = None 
         Z_total_size = Z1.numel()
 
+    if diag_scaling:
+        R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=W_k, B=W_q, eta=0.99)
+    else:
+        R = rho * torch.ones((Y.shape[0], Y.shape[1]), device=Y.device, dtype=Y.dtype)
+        Gamma_1 = gamma * torch.ones((W_q.shape[0], 1), device=W_q.device, dtype=W_q.dtype) 
+        Gamma_2 = gamma * torch.ones((W_k.shape[0], 1), device=W_k.device, dtype=W_k.dtype) if use_Z2 else None
+
     for t in range(max_iter):
         if use_Z2:
-            Y_new = prox_h_conj(Y + rho * (Z1_bar.t() @ W_q + W_k.t() @ Z2_bar), rho)
-            Z1_new = (1 / (1 + gamma * mu)) * (Z1 - gamma * (W_q @ Y_new.t() + G_wk))
-            Z2_new = (1 / (1 + gamma * mu)) * (Z2 - gamma * (W_k @ Y_new + G_wq))
+            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ W_q + W_k.t() @ Z2_bar), 1, R=R)
+            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (W_q @ Y_new.t() + G_wk))
+            Z2_new = (1 / (1 + Gamma_2 * mu)) * (Z2 - Gamma_2 * (W_k @ Y_new + G_wq))
         else: 
-            Y_new = prox_h_conj(Y + rho * Z1_bar.t() @ W_q, rho)  
-            Z1_new = (1 / (1 + gamma * mu)) * (Z1 - gamma * (W_q @ Y_new.t() + G_wk))
+            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ W_q), 1, R=R)  
+            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (W_q @ Y_new.t() + G_wk))
         
         if use_Z2:
-            r1 = ( Y_new - Y - rho * ((Z1_bar - Z1_new).t() @ W_q)
-                    - rho * (W_k.t() @ (Z2_bar - Z2_new))).norm().item() / rho
-            r2 = ((Z1_new - Z1).norm().pow(2) + (Z2_new - Z2).norm().pow(2)).sqrt().item() / gamma
+            r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ W_q)
+                                        - R * (W_k.t() @ (Z2_bar - Z2_new)))).norm().item()
+            r2 = (((Z1_new - Z1) / Gamma_1).norm().pow(2) + ((Z2_new - Z2) / Gamma_2).norm().pow(2)).sqrt().item()
         else:
-            r1 = ( Y_new - Y - rho * ((Z1_bar - Z1_new).t() @ W_q)).norm().item() / rho
-            r2 = (Z1_new - Z1).norm().item() / gamma
+            r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ W_q))).norm().item()
+            r2 = ((Z1_new - Z1) / Gamma_1).norm().item()
         residuals["r1"].append(r1)
         residuals["r2"].append(r2)
 
         if t >= 1:
             if use_Z2:
-                norm1 = ((Z1_new.t() @ W_q + W_k.t() @ Z2_new).pow(2).sum()).sqrt()
-                norm2 = ((W_q @ Y_new.t()).pow(2).sum() + (W_k @ Y_new).pow(2).sum()).sqrt()
+                norm1 = ((Z1_new.t() @ W_q + W_k.t() @ Z2_new).pow(2).sum()).sqrt().item()
+                norm2 = ((W_q @ Y_new.t()).pow(2).sum() \
+                         + (W_k @ Y_new).pow(2).sum()).sqrt().item()
             else:
-                norm1 = (Z1_new.t() @ W_q).pow(2).sum().sqrt()
-                norm2 = (W_q @ Y_new.t()).pow(2).sum().sqrt()
+                norm1 = (Z1_new.t() @ W_q).pow(2).sum().sqrt().item()
+                norm2 = (W_q @ Y_new.t()).pow(2).sum().sqrt().item()
             if norm1 < 1e-6: norm1 = 1.0
             if norm2 < 1e-6: norm2 = 1.0
             r1_rel = max(1e-8, r1 - eps_abs * (Y.numel() ** 0.5)) / norm1
@@ -243,10 +287,27 @@ def pdhg_method_AB(
                     Y = Y_new 
                     break
                 
-        Z1_bar = 2 * Z1_new - Z1
+        if acceleration and not diag_scaling:
+            theta = 1 / (1 + 2 * gamma * mu)**0.5
+            gamma = theta * gamma 
+            rho = rho / theta
+            R = rho * torch.ones((Y.shape[0], Y.shape[1]), device=Y.device, dtype=Y.dtype)
+            Gamma_1 = gamma * torch.ones((W_k.shape[0], 1), device=W_k.device, dtype=W_k.dtype) 
+            if use_Z2:
+                Gamma_2 = gamma * torch.ones((W_q.shape[0], 1), device=W_q.device, dtype=W_q.dtype)  
+
+        if mu > 0 and h_conj is not None:
+            dual_val = - h_conj(Y_new) - (1/(2 * mu)) * (W_q @ Y_new.t() + G_wk).pow(2).sum()
+            if use_Z2:
+                dual_val = dual_val - (1/(2 * mu)) * (W_k @ Y_new + G_wq).pow(2).sum()
+            residuals["dual_vals"].append(dual_val.item())
+            if f_star is not None:
+                residuals["rel_gap"].append( np.abs(f_star - dual_val.item()) / (abs(f_star) + 1e-12) )
+
+        Z1_bar = Z1_new + theta * (Z1_new - Z1)
         Z1 = Z1_new
         if use_Z2:  
-            Z2_bar = 2 * Z2_new - Z2
+            Z2_bar = Z2_new + theta * (Z2_new - Z2)
             Z2 = Z2_new
         Y = Y_new
     return Z1, Z2, residuals, (Y_new.pow(2).sum()).sqrt().item()
@@ -327,3 +388,34 @@ def check_dual_feasible(A, B, Gk, Gq, max_kron=1_000, verbose=True, maxit=10000,
     res = torch.sqrt(RA.pow(2).sum() + RB.pow(2).sum()).item() / normC
  
     return Y, res
+
+
+
+def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False):
+    device, dtype = A.device, A.dtype
+    p2, n = A.shape
+    p1, nB = B.shape 
+
+    # |B| row/col sums 
+    r_B = B.abs().sum(dim=1)                 # (p1,)
+    c_B = B.abs().sum(dim=0)                 # (n,)
+
+    # |A| row/col sums 
+    r_A = A.abs().sum(dim=1)                 # (p2,)
+    c_A = A.abs().sum(dim=0)                 # (n,)
+ 
+    inv_rB = torch.where(r_B > 0, 1.0 / (r_B + eps), torch.zeros_like(r_B))
+    inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))
+    inv_c_sum = torch.where(
+        (c_B[None, :] + c_A[:, None]) > 0, 1.0 / (c_B[None, :] + c_A[:, None] + eps),
+        torch.zeros((n, n), device=device, dtype=dtype))
+
+    # Diagonal entries as broadcastable tensors: 
+    R       = eta * inv_c_sum                     # (n, n)   for Y
+    Gamma_1 = eta * inv_rB[:, None]               # (p1, 1)  for Z1 (same across its n cols)
+    Gamma_2 = eta * inv_rA[:, None]               # (p2, 1)  for Z2 (same across its n cols)
+
+    if debug:
+        assert torch.allclose(1/inv_c_sum, torch.ones(n, 1) @ c_B[None, :] + c_A[:, None] @ torch.ones(1, n)), "Column sum mismatch!"
+
+    return R, Gamma_1, Gamma_2 

@@ -10,4 +10,4 @@ config:
   kq_weight_clip: 100 # 100
 
 name: gpt-tiny
-kq_max_type: w-clip # softcap, lnorm, default, w-clip
+kq_max_type: default # softcap, lnorm, default, w-clip

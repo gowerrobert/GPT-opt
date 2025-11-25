@@ -6,6 +6,7 @@
 import torch
 import math
 import warnings
+from .polar import PolarExpress
 
 
 
@@ -102,7 +103,7 @@ class Muon(torch.optim.Optimizer):
             closure (Callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
-        
+
         loss = None
         if closure is not None:
                 with torch.enable_grad():

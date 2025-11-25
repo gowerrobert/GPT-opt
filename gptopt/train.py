@@ -18,6 +18,7 @@ class Logging():
         self.kq_max = []
         self.val_kq_max = []
 
+
 def eval_validation_loss(model, val_dataloader, val_accum_steps, autocast_ctxt):
     world_size, rank, local_rank, device  = get_worker_info()
     model.eval()

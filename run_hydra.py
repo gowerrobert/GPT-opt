@@ -85,6 +85,8 @@ def main(config : DictConfig):
     file_name = f"{opt_config['name']}-lr-{opt_config['lr']}-{opt_config['lr_schedule']}"
     if 'muon_lr' in opt_config:
         file_name += f"-muonlr-{opt_config['muon_lr']}"
+    if 'max_norm_tr' in opt_config:
+        file_name += f"-maxnorm-{opt_config['max_norm_tr']}"
     file_name += f"-{config_hash}"
     output_path = os.path.join(output_dir, file_name + '.json')
     ckpt_dir = os.path.join(ckpt_dir_base, file_name) + '/' if CKPT_DIR != "" else ""
@@ -104,7 +106,7 @@ def main(config : DictConfig):
         model_copy = DDP(model_copy, device_ids=[local_rank])
     
     
-    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name) else model_copy.parameters()
+    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name or "pdhg" in opt_name) else model_copy.parameters()
 
     optimizer = optimizer_obj(p, **hyperp)
 
@@ -145,6 +147,8 @@ def main(config : DictConfig):
             logger.name += f"-muonlr-{opt_config['muon_lr']}"
         if "muon_lr_ratio" in opt_config:
             logger.name += f"-muonlr_ratio-{opt_config['muon_lr_ratio']}"
+        if "max_norm_tr" in opt_config:
+            logger.name += f"-maxnorm-{opt_config['max_norm_tr']}" 
         if os.path.exists(output_path):
             print(f"File {output_path} already exists. Overwriting")
         with open(output_path, 'w') as file:

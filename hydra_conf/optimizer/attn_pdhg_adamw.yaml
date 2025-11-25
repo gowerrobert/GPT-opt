@@ -5,4 +5,6 @@ optimizer_params:
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  max_norm_tr: 0.001
+  max_norm_tr: 0.1
+  pdhg_max_iter: 100
+  pdhg_momentum: true 
