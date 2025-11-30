@@ -1,0 +1,13 @@
+optimizer_params:
+  name: attn_pd_adamw
+  lr: 0.001
+  betas: [0.95, 0.95]
+  weight_decay: 0
+  lr_schedule: constant-linear
+  warm_up_fraction: 0.4
+  max_norm_tr: 0.001
+  pdhg_max_iter: 200
+  pdhg_momentum: false 
+  diag_scaling: true 
+  acceleration: false
+  pd_type: "fista" # "fista",  "pdhg"
