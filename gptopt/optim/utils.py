@@ -274,7 +274,21 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)), 
                   'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
-                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500)
+                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
+                  'pd_type': opt_config.get('pd_type', 'pdhg'),
+                  'momentum': opt_config.get('momentum', False),
+                  'diag_scaling': opt_config.get('diag_scaling', True),
+                  'acceleration': opt_config.get('acceleration', False)
+                  }
+    elif name == "attn_fista_adamw":
+        opt_obj = AttnPDAdamW
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)), 
+                  'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
+                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
+                  'pd_type': opt_config.get('pd_type', 'fista'),
+                  'momentum': opt_config.get('momentum', False),
                   }
     else:
         raise KeyError(f"Unknown optimizer name {name}.")

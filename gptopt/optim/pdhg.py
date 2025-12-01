@@ -22,7 +22,7 @@ class AttnPDAdamW(Optimizer):
         qk_lr_scale=1.0,
         max_norm_tr=1,
         pdhg_max_iter=1000,
-        pdhg_momentum=False,
+        momentum=False,
         diag_scaling=False,
         acceleration=False,
         pd_type="pdhg",
@@ -43,7 +43,7 @@ class AttnPDAdamW(Optimizer):
             qk_lr_scale=qk_lr_scale,
             max_norm_tr=max_norm_tr,
             pdhg_max_iter=pdhg_max_iter, 
-            pdhg_momentum=pdhg_momentum,
+            momentum=momentum,
             diag_scaling=diag_scaling,
             acceleration=acceleration,
             pd_type=pd_type,
@@ -51,7 +51,7 @@ class AttnPDAdamW(Optimizer):
         print(
             f"[AttnPDAdamW] lr={lr}, betas={betas}, eps={eps}, wd={weight_decay}, "
             f"qk_lr_scale={qk_lr_scale}, max_norm_tr={max_norm_tr}, pdhg_iters={pdhg_max_iter}, "
-            f"\n    momentum={pdhg_momentum}, diag_scaling={diag_scaling}, accel={acceleration}, {pd_type=}"
+            f"\n    momentum={momentum}, diag_scaling={diag_scaling}, accel={acceleration}, {pd_type=}"
         )
         super().__init__(params, defaults)
 
@@ -75,7 +75,7 @@ class AttnPDAdamW(Optimizer):
             wd = group["weight_decay"]
             qk_lr_scale = group["qk_lr_scale"]
             pdhg_max_iter = group["pdhg_max_iter"]
-            momentum = group["pdhg_momentum"]
+            momentum = group["momentum"]
             pd_type = group["pd_type"] 
 
             for p in group["params"]:   
@@ -569,12 +569,12 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
     return X1, Z1_fista, Z2_fista, residuals
 
 
-def proj_subgrad_l1(AZ, Y):
-    # \min_S \|AZ - S\|_F s.t. S \in \partial \|\vec(Y)\|_1 
+def proj_subgrad_l1(AZ, Y, beta=1):
+    # \min_S \beta\|AZ/\beta - S\|_F s.t. S \in \partial \|\vec(Y)\|_1 
     S = torch.sign(Y)
-    S[Y == 0] = torch.clamp(AZ[Y == 0], -1.0, 1.0)
-    r = (AZ - S).pow(2).sum().sqrt().item()
-    norm = max(AZ.pow(2).sum().sqrt().item(), S.pow(2).sum().sqrt().item())
+    S[Y == 0] = torch.clamp((AZ[Y == 0]/beta), -1.0, 1.0)
+    r = beta * (AZ / beta - S).pow(2).sum().sqrt().item()
+    norm = AZ.pow(2).sum().sqrt().item()
     if norm < 1e-6: norm = 1.0
     return r, r / norm
 
@@ -585,7 +585,7 @@ def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu):
     # 0 \in \partial h^*(Y) - \mathcal{A}(Z)
     # 0 = G + \mu Z + \mathcal{A}^*(Y)
     AZ = Z1.t() @ B + A.t() @ Z2 
-    r1, r1_rel = proj_subgrad_l1(AZ / beta, Y)
+    r1, r1_rel = proj_subgrad_l1(AZ, Y, beta=beta)
     r2_1 = (G1 + mu * Z1 + B @ Y.t()).pow(2).sum().sqrt().item()
     r2_2 = (G2 + mu * Z2 + A @ Y).pow(2).sum().sqrt().item()
     r2 = (r2_1**2 + r2_2**2)**0.5 

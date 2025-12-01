@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import contextlib, json, time
+from glob import glob
+import pandas as pd
 
 from gptopt.optim.pdhg import prox_l1, pdhg_method_AB, fista_ls_l1_reg, AttnPDAdamW
 from gptopt.train import Logging, eval_validation_loss
@@ -630,7 +632,7 @@ def main(config: DictConfig):
     model_copy = copy.deepcopy(model).to(device)
     opt_name = opt_config["name"]
     # Setup optimizer: allow using local AttnPDAdamW in this test
-    if opt_name == "attn_pd_adamw":
+    if opt_name in ["attn_pd_adamw", "attn_fista_adamw"]:
         lr = float(opt_config.get("lr", 1e-3))
         betas = tuple(opt_config.get("betas", (0.9, 0.999)))
         eps = float(opt_config.get("eps", 1e-8))
@@ -648,7 +650,7 @@ def main(config: DictConfig):
             max_norm_tr=max_norm_tr,
             diag_scaling=opt_config.get("diag_scaling", False),
             pdhg_max_iter=opt_config.get("pdhg_max_iter", 1000),
-            pdhg_momentum=opt_config.get("pdhg_momentum", False),
+            momentum=opt_config.get("momentum", False),
             acceleration=opt_config.get("acceleration", False),
             pd_type=opt_config.get("pd_type", "pdhg"),
         )
@@ -707,3 +709,131 @@ def main(config: DictConfig):
 
     if ddp:
         dist.destroy_process_group() 
+
+
+def load_sweep_jsons(base_dir) -> pd.DataFrame:
+    """Recursively load all JSON logger files from the PDHG sweep.
+
+    Each record includes:
+      - path: full path to the JSON file
+      - lr: learning rate parsed from the directory name bs-4-lr-*-wd-*
+      - wd: weight decay parsed from the directory name
+      - max_norm_tr: parsed from filename pattern ...-maxnorm-<value>-<hash>.json, if present
+      - final_train_loss: last value in logger.losses
+      - min_val_loss: minimum of logger.val_losses (NaN if empty)
+    """
+    pattern = os.path.join(base_dir, "**", "*.json")
+    files = sorted(glob(pattern, recursive=True))
+    records = []
+
+    for path in files:
+        try:
+            with open(path, "r") as f:
+                d = json.load(f)
+        except Exception as e:
+            print(f"Skipping {path} due to error: {e}")
+            continue
+
+        losses = d.get("losses", [])
+        val_losses = d.get("val_losses", [])
+        if not losses:
+            continue
+
+        final_train_loss = losses[-1]
+        min_val_loss = min(val_losses) if val_losses else float("nan")
+
+        # Parse lr and wd from directory name: bs-4-lr-0.003-wd-0
+        lr = None
+        wd = None
+        dir_name = os.path.basename(os.path.dirname(path))
+        parts = dir_name.split("-")
+        for i, p in enumerate(parts):
+            if p == "lr" and i + 1 < len(parts):
+                try:
+                    lr = float(parts[i + 1])
+                except ValueError:
+                    pass
+            if p == "wd" and i + 1 < len(parts):
+                try:
+                    wd = float(parts[i + 1])
+                except ValueError:
+                    pass
+
+        # Parse max_norm_tr from filename: ...-maxnorm-0.001-<hash>.json
+        max_norm_tr = None
+        fname_parts = os.path.basename(path).split("-")
+        for i, p in enumerate(fname_parts):
+            if p == "maxnorm" and i + 1 < len(fname_parts):
+                val_str = fname_parts[i + 1]
+                # Strip extension if it somehow ended up attached
+                val_str = val_str.replace(".json", "")
+                try:
+                    max_norm_tr = float(val_str)
+                except ValueError:
+                    pass
+
+        records.append({
+            "path": path,
+            "lr": lr,
+            "wd": wd,
+            "max_norm_tr": max_norm_tr,
+            "final_train_loss": final_train_loss,
+            "min_val_loss": min_val_loss,
+        })
+
+    return pd.DataFrame(records)
+
+
+
+def plot_sweep(df_in: pd.DataFrame) -> None:
+    """Plot sweep metrics vs lr for different max_norm_tr values, and a 2D heatmap.
+
+    Expects df_in to have columns:
+      - lr
+      - max_norm_tr
+      - final_train_loss
+      - min_val_loss
+    """
+    df_plot = df_in.dropna(subset=["lr", "max_norm_tr"]).copy()
+    if df_plot.empty:
+        print("No rows with both lr and max_norm_tr.")
+        return
+
+    print("Number of runs used for plots:", len(df_plot))
+
+    # 1) Line plots: metric vs lr, colored by max_norm_tr
+    fig, ax = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
+
+    for maxn, sub in df_plot.groupby("max_norm_tr"):
+        label = f"maxnorm={maxn:g}"
+        sub_sorted = sub.sort_values("lr")
+        ax[0].plot(sub_sorted["lr"], sub_sorted["final_train_loss"], marker="o", label=label)
+        ax[1].plot(sub_sorted["lr"], sub_sorted["min_val_loss"], marker="o", label=label)
+
+    ax[0].set_xscale("log")
+    ax[1].set_xscale("log")
+    ax[0].set_xlabel("lr")
+    ax[1].set_xlabel("lr")
+    ax[0].set_ylabel("final train loss")
+    ax[1].set_ylabel("min val loss")
+    ax[0].set_title("Train loss vs lr")
+    ax[1].set_title("Val loss vs lr")
+    for a in ax:
+        a.grid(True, which="both", ls="--", alpha=0.4)
+    ax[1].legend()
+    plt.tight_layout()
+
+    # 2) 2D heatmap: min_val_loss over (lr, max_norm_tr)
+    if df_plot["lr"].nunique() > 1 and df_plot["max_norm_tr"].nunique() > 1:
+        pivot = df_plot.pivot_table(index="max_norm_tr", columns="lr", values="min_val_loss")
+        plt.figure(figsize=(6, 5))
+        im = plt.imshow(pivot.values, aspect="auto", origin="lower")
+        plt.colorbar(im, label="min val loss")
+        plt.xticks(range(len(pivot.columns)), [f"{x:.2e}" for x in pivot.columns], rotation=45)
+        plt.yticks(range(len(pivot.index)), [f"{y:.2e}" for y in pivot.index])
+        plt.xlabel("lr")
+        plt.ylabel("max_norm_tr")
+        plt.title("Sweep: min val loss over (lr, max_norm_tr)")
+        plt.tight_layout()
+    else:
+        print("Not enough variation in lr/max_norm_tr for a heatmap.")

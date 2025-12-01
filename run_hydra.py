@@ -106,7 +106,8 @@ def main(config : DictConfig):
         model_copy = DDP(model_copy, device_ids=[local_rank])
     
     
-    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name or "pdhg" in opt_name) else model_copy.parameters()
+    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name \
+                                          or "_pd_" in opt_name or "fista" in opt_name) else model_copy.parameters()
 
     optimizer = optimizer_obj(p, **hyperp)
 
