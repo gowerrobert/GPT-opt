@@ -196,89 +196,62 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
 
 def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
                               abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
-    # Methods and consistent colors
-    mus = list(res_all.keys())
-    all_methods = sorted({m for D in res_all.values() for m in D.keys()})
-    cmap = plt.cm.tab10
-    color_map = {m: cmap(i / max(1, len(all_methods)-1)) for i, m in enumerate(all_methods)}
+    return plot_residuals_grid_by_param(
+        res_all, param_name="mu", dual_scale=dual_scale, dpi=dpi,
+        abs_ylim=abs_ylim, rel_ylim=rel_ylim, gap_ylim=gap_ylim, dual_ylim=dual_ylim
+    )
 
-    # Layout from sample
-    sample = next(iter(res_all.values()))
-    has_gap  = any(("rel_gap"   in r) and len(r["rel_gap"])   for r in sample.values())
-    has_dual = any(("dual_vals" in r) and len(r["dual_vals"]) for r in sample.values())
+
+def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi=120,
+                                 abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
+    plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
+    pvals = sorted(res_all) if len(res_all) else []
+    methods = sorted({m for D in res_all.values() for m in D})
+    colors = {m: plt.cm.tab10(i / max(1, len(methods)-1)) for i, m in enumerate(methods)}
+    sample = next(iter(res_all.values()), {})
+    vals = sample.values() if isinstance(sample, dict) else []
+    has_gap  = any("rel_gap"   in r and len(r.get("rel_gap", []))   for r in vals)
+    has_dual = any("dual_vals" in r and len(r.get("dual_vals", [])) for r in vals)
     ncols = 4 if (has_gap and has_dual) else (3 if (has_gap or has_dual) else 2)
 
-    fig, axs = plt.subplots(len(mus), ncols, figsize=(5*ncols, 3.2*len(mus)), dpi=dpi)
+    fig, axs = plt.subplots(max(1, len(pvals)), ncols, figsize=(5*ncols, 3.2*max(1, len(pvals))), dpi=dpi)
     axs = np.atleast_2d(axs)
-    ls = {"r1":"-","r2":"--","r1_rel":"-","r2_rel":"--","rel_gap":":","dual":"-."}
 
-    for r, mu in enumerate(mus):
-        D = res_all[mu]
-        # Abs residuals
-        any_abs = False
-        for m in all_methods:
-            res = D.get(m, {})
-            if len(res.get("r1", [])):
-                axs[r,0].plot(res["r1"], color=color_map[m], ls=ls["r1"]); any_abs = True
-            if len(res.get("r2", [])):
-                axs[r,0].plot(res["r2"], color=color_map[m], ls=ls["r2"]); any_abs = True
-        if any_abs:
-            axs[r,0].set(yscale="log", title=f"μ={mu:g} | Abs", xlabel="iter")
-            if abs_ylim is not None: axs[r,0].set_ylim(abs_ylim)
-            axs[r,0].grid(True, which="both", ls="--", alpha=0.4)
-        else:
-            axs[r,0].axis("off")
+    specs = [
+        (0, [("r1","-"),("r2","--")], abs_ylim, "Abs", "log"),
+        (1, [("r1_rel","-"),("r2_rel","--")], rel_ylim, "Rel", "log"),
+    ]
+    if has_gap:
+        specs.append((2, [("rel_gap",":")], gap_ylim, "Gap", "log"))
+    if has_dual:
+        specs.append(((2 if not has_gap else 3), [("dual_vals","-.")], dual_ylim, "Dual", "symlog" if dual_scale else None))
 
-        # Rel residuals
-        any_rel = False
-        for m in all_methods:
-            res = D.get(m, {})
-            if len(res.get("r1_rel", [])):
-                axs[r,1].plot(res["r1_rel"], color=color_map[m], ls=ls["r1_rel"]); any_rel = True
-            if len(res.get("r2_rel", [])):
-                axs[r,1].plot(res["r2_rel"], color=color_map[m], ls=ls["r2_rel"]); any_rel = True
-        if any_rel:
-            axs[r,1].set(yscale="log", title=f"μ={mu:g} | Rel", xlabel="iter")
-            if rel_ylim is not None: axs[r,1].set_ylim(rel_ylim)
-            axs[r,1].grid(True, which="both", ls="--", alpha=0.4)
-        else:
-            axs[r,1].axis("off")
-
-        # Gap
-        if has_gap:
-            cg = 2
-            any_gap = False
-            for m in all_methods:
-                g = D.get(m, {}).get("rel_gap", [])
-                if len(g):
-                    axs[r,cg].plot(g, color=color_map[m], ls=ls["rel_gap"]); any_gap = True
-            if any_gap:
-                axs[r,cg].set(yscale="log", title=f"μ={mu:g} | Gap", xlabel="iter")
-                if gap_ylim is not None: axs[r,cg].set_ylim(gap_ylim)
-                axs[r,cg].grid(True, which="both", ls="--", alpha=0.4)
+    for r, pv in enumerate(pvals if pvals else [None]):
+        D = res_all[pv] if pvals else {}
+        for c, keys, ylim, title, yscale in specs:
+            any_ = False
+            a = axs[r, c]
+            for m in methods:
+                res = D.get(m, {})
+                for k, ls in keys:
+                    v = res.get(k, [])
+                    if len(v):
+                        a.plot(v, color=colors[m], ls=ls); any_ = True
+            if any_:
+                if yscale == "symlog":
+                    a.set_yscale("symlog", linthresh=1e-6)
+                elif yscale:
+                    a.set_yscale(yscale)
+                if ylim is not None:
+                    a.set_ylim(ylim)
+                label = f"{plabel}={pv:g} | {title}" if pv is not None else title
+                a.set(title=label, xlabel="iter")
+                a.grid(True, which="both", ls="--", alpha=0.4)
             else:
-                axs[r,cg].axis("off")
+                a.axis("off")
 
-        # Dual
-        if has_dual:
-            cd = 2 if (has_dual and not has_gap) else 3
-            any_dual = False
-            for m in all_methods:
-                dv = D.get(m, {}).get("dual_vals", [])
-                if len(dv):
-                    axs[r,cd].plot(dv, color=color_map[m], ls=ls["dual"]); any_dual = True
-            if any_dual:
-                if dual_scale: axs[r,cd].set_yscale("symlog", linthresh=1e-6)
-                axs[r,cd].set(title=f"μ={mu:g} | Dual", xlabel="iter")
-                if dual_ylim is not None: axs[r,cd].set_ylim(dual_ylim)
-                axs[r,cd].grid(True, which="both", ls="--", alpha=0.4)
-            else:
-                axs[r,cd].axis("off")
-
-    # Single legend, tight to the plots on the right
-    handles = [plt.Line2D([0],[0], color=color_map[m], ls='-') for m in all_methods]
-    fig.legend(handles, all_methods, loc="center left", bbox_to_anchor=(0.985, 0.5),
-               frameon=False, title="Methods")
+    handles = [plt.Line2D([0],[0], color=colors[m], ls='-') for m in methods]
+    fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
     plt.tight_layout(rect=[0,0,0.985,1])
     return fig, axs
 
