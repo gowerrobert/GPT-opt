@@ -5,7 +5,7 @@ optimizer_params:
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  max_norm_tr: 0.001
-  pdhg_max_iter: 50
-  momentum: true  
+  max_norm_tr: 0.0001
+  pdhg_max_iter: 100
+  momentum: false  
   pd_type: "fista" # "fista",  "pdhg"
