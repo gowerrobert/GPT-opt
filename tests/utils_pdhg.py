@@ -176,20 +176,20 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     print("obj (acceleration): ", func_obj(Z1_t_acceleration, Z2_acceleration), 
         "\nconstraint viol (acceleration): ", func_constr_viol(Z1_t_acceleration, Z2_acceleration))
 
-
-    Y_fista, Z1_fista, Z2_fista, residuals_fista = fista_ls_l1_reg(W_k=A, W_q=B, G_wk=G1,
-                                G_wq=G2, beta=beta, mu=mu_reg, lamb_max=lamb_max, max_iter=max_iter, 
-                                eps_abs=1e-8, eps_rel=1e-8, f_star=f_star, stopping=stopping,
-                                pd_residuals=pd_residuals)
-
-    print("obj (fista): ", func_obj(Z1_fista, Z2_fista), 
-        "\nconstraint viol (fista): ", func_constr_viol(Z1_fista, Z2_fista))
-
-
     residuals = {'PDHG': residuals_vanilla,
                 "PDHG DS": residuals_diag_scaling,
                 "PDHG Acc": residuals_acceleration,
-                "FISTA": residuals_fista}
+                }
+
+    if mu_reg > 0:
+        Y_fista, Z1_fista, Z2_fista, residuals_fista = fista_ls_l1_reg(W_k=A, W_q=B, G_wk=G1,
+                                    G_wq=G2, beta=beta, mu=mu_reg, lamb_max=lamb_max, max_iter=max_iter, 
+                                    eps_abs=1e-8, eps_rel=1e-8, f_star=f_star, stopping=stopping,
+                                    pd_residuals=pd_residuals)
+
+        print("obj (fista): ", func_obj(Z1_fista, Z2_fista), 
+            "\nconstraint viol (fista): ", func_constr_viol(Z1_fista, Z2_fista))
+        residuals["FISTA"] = residuals_fista    
 
     return residuals
 
@@ -316,12 +316,12 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     device = "cuda" if torch.cuda.is_available() else "cpu"
     A_np = np.random.randn(m, n) * std1
     B_np = np.random.randn(m, n) * std1
+    rank = int(min(m, n) * rank_ratio)
     if G_in_range:
-        Y0_np = np.random.randn(n, n) * std2
+        Y0_np = generate_matrix_rank_normalized_op(n, n, rank) * std2
         G1_np = B_np @ Y0_np.T
         G2_np = A_np @ Y0_np
     else:
-        rank = int(min(m, n) * rank_ratio)
         G1_np = generate_matrix_rank_normalized_op(m, n, rank) * std2
         G2_np = generate_matrix_rank_normalized_op(m, n, rank) * std2
         if debug:
