@@ -1,0 +1,15 @@
+optimizer_params:
+  name: attn_rehpdhg_adamw
+  lr: 0.001
+  betas: [0.95, 0.95]
+  weight_decay: 0
+  lr_schedule: constant-linear
+  warm_up_fraction: 0.4
+  max_norm_tr: 0.0001
+  pdhg_max_iter: 10000
+  momentum: false 
+  diag_scaling: true 
+  acceleration: false
+  halpern_start: 5
+  reflected_pdhg: true
+  pd_type: "pdhg" # "fista",  "pdhg"

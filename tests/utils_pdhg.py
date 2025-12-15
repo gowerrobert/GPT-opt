@@ -107,33 +107,79 @@ def cvxpy_AB(G1, G2, A, B, beta, mu=0, verbose=False):
 
 
 def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,  
-                    f_star=None, max_iter=1000, stopping=True, pd_residuals=None):
+                    f_star=None, max_iter=1000, stopping=True, pd_residuals=None,
+                    eps_abs=1e-8, eps_rel=1e-8):
 
     func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2) \
                             + (mu_reg / 2) * ((Z1).pow(2).sum() + Z2.pow(2).sum())).item()  
     func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
 
+    metrics = {} 
+
     Z1_t_diag_scaling, Z2_diag_scaling, residuals_diag_scaling, _ = pdhg_method_AB(
-                prox_h_conj,
-                W_k=A,
-                W_q=B,
-                G_wk=G1,
-                G_wq=G2,
-                mu=mu_reg,
-                beta=beta,
-                max_iter=max_iter,
-                eps_abs=1e-8,
-                eps_rel=1e-8,
-                stopping=stopping,
-                h_conj=h_conj,
-                f_star=f_star,
-                diag_scaling=True,
-                pd_residuals=pd_residuals
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals
             )
+    metrics["PDHG DS"] = {
+        "obj": func_obj(Z1_t_diag_scaling, Z2_diag_scaling),
+        "viol": func_constr_viol(Z1_t_diag_scaling, Z2_diag_scaling),
+    }
 
-    print("obj (diag scaling): ", func_obj(Z1_t_diag_scaling, Z2_diag_scaling), 
-        "\nconstraint viol (diag scaling): ", func_constr_viol(Z1_t_diag_scaling, Z2_diag_scaling))
+    del Z1_t_diag_scaling, Z2_diag_scaling
 
+    Z1_t_diag_scaling_h, Z2_diag_scaling_h, residuals_diag_scaling_h, _ = pdhg_method_AB(
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
+                halpern_start=2
+            )
+    metrics["HPDHG DS"] = {
+        "obj": func_obj(Z1_t_diag_scaling_h, Z2_diag_scaling_h),
+        "viol": func_constr_viol(Z1_t_diag_scaling_h, Z2_diag_scaling_h),
+    }
+    del Z1_t_diag_scaling_h, Z2_diag_scaling_h
+
+    Z1_t_diag_scaling_reh, Z2_diag_scaling_reh, residuals_diag_scaling_reh, _ = pdhg_method_AB(
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
+                halpern_start=2, reflected_pdhg=True
+            )
+    metrics["reHPDHG DS"] = {
+        "obj": func_obj(Z1_t_diag_scaling_reh, Z2_diag_scaling_reh),
+        "viol": func_constr_viol(Z1_t_diag_scaling_reh, Z2_diag_scaling_reh),
+    }
+    del Z1_t_diag_scaling_reh, Z2_diag_scaling_reh
+
+    Z1_t_reh, Z2_reh, residuals_reh, _ = pdhg_method_AB(
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, diag_scaling=False, pd_residuals=pd_residuals,
+                halpern_start=2, reflected_pdhg=True
+            )
+    metrics["reHPDHG"] = {
+        "obj": func_obj(Z1_t_reh, Z2_reh),
+        "viol": func_constr_viol(Z1_t_reh, Z2_reh),
+    }
+    del Z1_t_reh, Z2_reh
+
+    Z1_h, Z2_h, residuals_h, _ = pdhg_method_AB(
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
+                halpern_start=2
+            )
+    metrics["HPDHG"] = {
+        "obj": func_obj(Z1_h, Z2_h),
+        "viol": func_constr_viol(Z1_h, Z2_h),
+    }
+    del Z1_h, Z2_h
 
     Z1_t_vanilla, Z2_vanilla, residuals_vanilla, _ = pdhg_method_AB(
                 prox_h_conj,
@@ -144,16 +190,18 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 mu=mu_reg,
                 beta=beta,
                 max_iter=max_iter,
-                eps_abs=1e-8,
-                eps_rel=1e-8,
+                eps_abs=eps_abs,
+                eps_rel=eps_rel,
                 stopping=stopping,
                 h_conj=h_conj,
                 f_star=f_star, 
                 pd_residuals=pd_residuals
             )
-    print("obj (vanilla): ", func_obj(Z1_t_vanilla, Z2_vanilla), 
-        "\nconstraint viol (vanilla): ", func_constr_viol(Z1_t_vanilla, Z2_vanilla))
-
+    metrics["PDHG"] = {
+        "obj": func_obj(Z1_t_vanilla, Z2_vanilla),
+        "viol": func_constr_viol(Z1_t_vanilla, Z2_vanilla),
+    }
+    del Z1_t_vanilla, Z2_vanilla
 
     Z1_t_acceleration, Z2_acceleration, residuals_acceleration, _ = pdhg_method_AB(
                 prox_h_conj,
@@ -164,8 +212,8 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 mu=mu_reg,
                 beta=beta,
                 max_iter=max_iter,
-                eps_abs=1e-8,
-                eps_rel=1e-8,
+                eps_abs=eps_abs,
+                eps_rel=eps_rel,
                 stopping=stopping,
                 h_conj=h_conj,
                 f_star=f_star, 
@@ -173,23 +221,40 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 pd_residuals=pd_residuals
             )
 
-    print("obj (acceleration): ", func_obj(Z1_t_acceleration, Z2_acceleration), 
-        "\nconstraint viol (acceleration): ", func_constr_viol(Z1_t_acceleration, Z2_acceleration))
-
+    metrics["PDHG Acc"] = {
+        "obj": func_obj(Z1_t_acceleration, Z2_acceleration),
+        "viol": func_constr_viol(Z1_t_acceleration, Z2_acceleration),
+    }
+    del Z1_t_acceleration, Z2_acceleration
+    
     residuals = {'PDHG': residuals_vanilla,
                 "PDHG DS": residuals_diag_scaling,
                 "PDHG Acc": residuals_acceleration,
+                "HPDHG DS": residuals_diag_scaling_h,
+                "reHPDHG DS": residuals_diag_scaling_reh,
+                "HPDHG": residuals_h,
+                "reHPDHG": residuals_reh,  # reHPDHG without diag scaling not implemented separately
                 }
-
+    
     if mu_reg > 0:
         Y_fista, Z1_fista, Z2_fista, residuals_fista = fista_ls_l1_reg(W_k=A, W_q=B, G_wk=G1,
                                     G_wq=G2, beta=beta, mu=mu_reg, lamb_max=lamb_max, max_iter=max_iter, 
-                                    eps_abs=1e-8, eps_rel=1e-8, f_star=f_star, stopping=stopping,
+                                    eps_abs=eps_abs, eps_rel=eps_rel, f_star=f_star, stopping=stopping,
                                     pd_residuals=pd_residuals)
 
-        print("obj (fista): ", func_obj(Z1_fista, Z2_fista), 
-            "\nconstraint viol (fista): ", func_constr_viol(Z1_fista, Z2_fista))
-        residuals["FISTA"] = residuals_fista    
+        metrics["FISTA"] = {
+                "obj": func_obj(Z1_fista, Z2_fista),
+                "viol": func_constr_viol(Z1_fista, Z2_fista),
+            }
+        residuals["FISTA"] = residuals_fista 
+ 
+    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
+    print(header)
+    print("-" * len(header))
+    for method in residuals.keys():
+        if method in metrics:
+            m = metrics[method]
+            print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
 
     return residuals
 
@@ -207,7 +272,7 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
     plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
     pvals = sorted(res_all) if len(res_all) else []
     methods = sorted({m for D in res_all.values() for m in D})
-    colors = {m: plt.cm.tab10(i / max(1, len(methods)-1)) for i, m in enumerate(methods)}
+    colors = {m: plt.cm.Set2(i / max(1, len(methods)-1)) for i, m in enumerate(methods)}
     sample = next(iter(res_all.values()), {})
     vals = sample.values() if isinstance(sample, dict) else []
     has_gap  = any("rel_gap"   in r and len(r.get("rel_gap", []))   for r in vals)
@@ -259,7 +324,7 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
 def plot_residuals_compare(all_res, dpi=120, dual_scale=False,
                            abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
     methods = sorted(all_res.keys())
-    cmap = plt.cm.tab10
+    cmap = plt.cm.Set2
     colors = {m: cmap(i / max(1, len(methods)-1)) for i, m in enumerate(methods)}
     has_gap  = any("rel_gap"   in r and len(r["rel_gap"])   for r in all_res.values())
     has_dual = any("dual_vals" in r and len(r["dual_vals"]) for r in all_res.values())
@@ -317,11 +382,12 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     A_np = np.random.randn(m, n) * std1
     B_np = np.random.randn(m, n) * std1
     rank = int(min(m, n) * rank_ratio)
-    if G_in_range:
+    if G_in_range: 
         Y0_np = generate_matrix_rank_normalized_op(n, n, rank) * std2
         G1_np = B_np @ Y0_np.T
         G2_np = A_np @ Y0_np
     else:
+        rank = int(min(m, n) * rank_ratio)
         G1_np = generate_matrix_rank_normalized_op(m, n, rank) * std2
         G2_np = generate_matrix_rank_normalized_op(m, n, rank) * std2
         if debug:
@@ -338,10 +404,11 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     nB = torch.linalg.norm(B, ord="fro").item()
     lamb_max = (nA * nA + nB * nB) ** 0.5
 
-    matrix_details(A)
-    matrix_details(B)
-    matrix_details(G1)
-    matrix_details(G2)
+    if debug:
+        matrix_details(A)
+        matrix_details(B)
+        matrix_details(G1)
+        matrix_details(G2)
     
     return A, B, G1, G2, A_np, B_np, G1_np, G2_np, lamb_max
 
@@ -391,7 +458,7 @@ def plot_residuals_layers(residuals_by_layer, dual_scale=False):
 
 def train(train_dataloader, val_dataloader, model, optimizer, training_params, 
           logging_params, scheduler=None, ckpt_dir="", wandb_run=None,
-          number_of_batches=np.inf):
+          number_of_batches=1):
     typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
     record_pdhg_info = [0, 10, 100]
@@ -667,7 +734,7 @@ def main(config: DictConfig):
     model_copy = copy.deepcopy(model).to(device)
     opt_name = opt_config["name"]
     # Setup optimizer: allow using local AttnPDAdamW in this test
-    if opt_name in ["attn_pd_adamw", "attn_fista_adamw"]:
+    if opt_name in ["attn_pd_adamw", "attn_fista_adamw", "attn_rehpdhg_adamw"]:
         lr = float(opt_config.get("lr", 1e-3))
         betas = tuple(opt_config.get("betas", (0.9, 0.999)))
         eps = float(opt_config.get("eps", 1e-8))
@@ -688,6 +755,8 @@ def main(config: DictConfig):
             momentum=opt_config.get("momentum", False),
             acceleration=opt_config.get("acceleration", False),
             pd_type=opt_config.get("pd_type", "pdhg"),
+            halpern_start=opt_config.get("halpern_start", 5),
+            reflected_pdhg=opt_config.get("reflected_pdhg", False),
         )
         use_my_adamw = True
     else:

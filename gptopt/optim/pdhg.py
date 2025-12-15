@@ -3,6 +3,7 @@ import torch
 from torch.optim import Optimizer
 import numpy as np
 from typing import Optional, Callable
+from .least_squares import Y_dual_feasible
 
 
 
@@ -26,6 +27,8 @@ class AttnPDAdamW(Optimizer):
         diag_scaling=False,
         acceleration=False,
         pd_type="pdhg",
+        halpern_start: int = np.inf,
+        reflected_pdhg: bool = False,
     ):
         params = []
         self.name_by_param = {}
@@ -47,11 +50,13 @@ class AttnPDAdamW(Optimizer):
             diag_scaling=diag_scaling,
             acceleration=acceleration,
             pd_type=pd_type,
+            halpern_start=halpern_start,
+            reflected_pdhg=reflected_pdhg,
         )
         print(
             f"[AttnPDAdamW] lr={lr}, betas={betas}, eps={eps}, wd={weight_decay}, "
             f"qk_lr_scale={qk_lr_scale}, max_norm_tr={max_norm_tr}, pdhg_iters={pdhg_max_iter}, "
-            f"\n    momentum={momentum}, diag_scaling={diag_scaling}, accel={acceleration}, {pd_type=}"
+            f"\n    momentum={momentum}, diag_scaling={diag_scaling}, accel={acceleration}, {pd_type=}, {halpern_start=}, {reflected_pdhg=}"
         )
         super().__init__(params, defaults)
 
@@ -112,22 +117,23 @@ class AttnPDAdamW(Optimizer):
                     W_q, G_q = p[:n_embed, :],                  g[:n_embed, :]
                     W_k, G_k = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
                     W_v, G_v = p[2 * n_embed: 3 * n_embed, :],  g[2 * n_embed: 3 * n_embed, :]
-                    # Y0, dual_res = check_dual_feasible(W_k, W_q, G_k, G_q, maxit=10000)
-                    # print(f"{dual_res=}, ||Y0||_F={Y0.pow(2).sum().item():.4e}")
+                    Y0, dual_feas_res = Y_dual_feasible(A2=W_k, A1=W_q, G1=G_k, G2=G_q, maxit=20)
+                    print(f"{dual_feas_res=}, ||Y0||_F={Y0.pow(2).sum().item():.4e}")
                     # Y0 = torch.randn(W_q.shape[0], W_k.shape[0], device=W_q.device, dtype=W_q.dtype) * 1e-3
                     # print(f"|Y0||_F={Y0.pow(2).sum().item():.4e}")
                     nA = W_k.pow(2).sum().sqrt().item()
                     nB = W_q.pow(2).sum().sqrt().item()
                     lamb_max = (nA * nA + nB * nB) ** 0.5
-                    mu_max = (G_k.t() @ W_q + W_k.t() @ G_q).abs().max().item() / group["max_norm_tr"]
-                    mu_reg = max(0.1 * mu_max, 1e-6)
-                    print(f"{lamb_max=:.4e}, {mu_reg=:.4e}, {mu_max=:.4e}")
+                    # mu_max = (G_k.t() @ W_q + W_k.t() @ G_q).abs().max().item() / group["max_norm_tr"]
+                    # mu_reg = max(0.1 * mu_max, 1e-6)
+                    mu_reg = 0
+                    # print(f"{lamb_max=:.4e}, {mu_reg=:.4e}, {mu_max=:.4e}")
                     # PDHG to update key-query  
                     prox_h_conj = lambda y, rho, R: prox_l1(y, rho * group["max_norm_tr"], R=R)
                     h_conj = lambda y: group["max_norm_tr"] * torch.abs(y).sum()
                     assert W_q.shape == G_q.shape and W_k.shape == G_k.shape, \
                         print(f"{W_q.shape=}, {G_q.shape=}, {W_k.shape=}, {G_k.shape=}")
-                    Y0 = 0.001 * torch.randn((W_k.shape[1], W_q.shape[1]), device=W_k.device, dtype=W_k.dtype)
+                    # Y0 = 0.001 * torch.randn((W_k.shape[1], W_q.shape[1]), device=W_k.device, dtype=W_k.dtype)
                     # Y0 = None
                     if pd_type == "pdhg": 
                         # Z1_0=-G_k; Z2_0=-G_q
@@ -140,7 +146,8 @@ class AttnPDAdamW(Optimizer):
                             mu=mu_reg, eps_abs=1e-6, eps_rel=1e-12, stopping=False, min_iter=500,
                             Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                             diag_scaling=group["diag_scaling"], acceleration=group["acceleration"], 
-                            h_conj=h_conj, pd_residuals=pd_residuals_infty_ball
+                            h_conj=h_conj, pd_residuals=pd_residuals_infty_ball,
+                            halpern_start=group["halpern_start"], reflected_pdhg=group["reflected_pdhg"]
                         )
                     elif pd_type == "fista":
                         Y_fista, Z1_t, Z2_t, residuals = fista_ls_l1_reg(
@@ -225,7 +232,10 @@ def pdhg_method_AB(
     diag_scaling: bool = False,
     h_conj= None,
     f_star: float | None = None,
-    pd_residuals: Optional[callable] = None
+    pd_residuals: Optional[callable] = None,
+    norm_first_iter: bool = True,
+    halpern_start: int = np.inf,
+    reflected_pdhg: bool = False,
     ):
     use_Z2 = not ((W_k is None) or (G_wq is None) ) 
     if lamb_max is None:
@@ -297,7 +307,15 @@ def pdhg_method_AB(
 
 
         if t >= 1:
-            if pd_residuals is None:
+            if norm_first_iter:
+                if t == 5:
+                    norm1 = r1 if r1 > 1e-8 else 1.0
+                    norm2 = r2 if r2 > 1e-8 else 1.0
+                if t >= 5:
+                    r1_rel = r1 / norm1 
+                    r2_rel = r2 / norm2 
+
+            if pd_residuals is None and not norm_first_iter:
                 if use_Z2:
                     norm1 = ((Z1_new.t() @ W_q + W_k.t() @ Z2_new).pow(2).sum()).sqrt().item()
                     norm2 = ((W_q @ Y_new.t()).pow(2).sum() + (W_k @ Y_new).pow(2).sum()).sqrt().item()
@@ -306,9 +324,12 @@ def pdhg_method_AB(
                     norm2 = (W_q @ Y_new.t()).pow(2).sum().sqrt().item()
                 if norm1 < 1e-6: norm1 = 1.0
                 if norm2 < 1e-6: norm2 = 1.0
-                r1_rel = max(1e-12, r1 - eps_abs * (Y.numel() ** 0.5)) / norm1
-                r2_rel = max(1e-12, r2 - eps_abs * (Z_total_size ** 0.5) ) / norm2 
-            residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel)
+                r1_rel = max(1e-8, r1 - eps_abs * (Y.numel() ** 0.5)) / norm1
+                r2_rel = max(1e-8, r2 - eps_abs * (Z_total_size ** 0.5) ) / norm2 
+            
+            if norm_first_iter and t >= 5 or not norm_first_iter:
+                residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
+
             if stopping and pd_residuals is None:
                 if (r1 <= eps_abs * (Y.numel() ** 0.5) + eps_rel * norm1
                     and r2 <= eps_abs * (Z_total_size ** 0.5) + eps_rel * norm2 and t >= min_iter):
@@ -334,7 +355,20 @@ def pdhg_method_AB(
             residuals["dual_vals"].append(dual_val.item())
             if f_star is not None:
                 residuals["rel_gap"].append( np.abs(f_star - dual_val.item()) / (abs(f_star) + 1e-12) )
-
+        if reflected_pdhg:
+            Y_new = 2 * Y_new - Y
+            Z1_new = 2 * Z1_new - Z1
+            if use_Z2:
+                Z2_new = 2 * Z2_new - Z2
+        if halpern_start == t:
+            anchor_Y = Y_new.clone()
+            anchor_Z1 = Z1_new.clone()
+            anchor_Z2 = Z2_new.clone() if use_Z2 else None
+        if halpern_start < t:
+            Y_new = ((t + 1)/ (t + 2)) * Y_new + (1 / (t + 2)) * anchor_Y
+            Z1_new = ((t + 1) / (t + 2)) * Z1_new + (1 / (t + 2)) * anchor_Z1
+            if use_Z2:
+                Z2_new = ((t + 1) / (t + 2)) * Z2_new + (1 / (t + 2)) * anchor_Z2
         Z1_bar = Z1_new + theta * (Z1_new - Z1)
         Z1 = Z1_new
         if use_Z2:  
@@ -345,80 +379,80 @@ def pdhg_method_AB(
 
 
 torch.no_grad()
-def check_dual_feasible(A, B, Gk, Gq, max_kron=1_000, verbose=True, maxit=10000, tol=1e-10):
+def Y_dual_feasible2(*, A1, A2, G1, G2, max_kron=1_000, verbose=True, 
+                    diag_scaling=True, maxit=1000, tol=1e-10, debug=False):
     """
-    Check dual feasibility: ∃ Y s.t. A Y = Gq and Y B^T = Gk^T.
+    Check dual feasibility: exists Y s.t. A1 Y^T = -G1 and A2 Y = -G2
 
-    We solve (A^T A)Y + Y(B^T B) = A^T Gq + Gk^T B for Y (LS optimum).
-    residual = sqrt( ||A Y + Gq||_F^2 + ||Y B^T + Gk^T||_F^2 ).
+    We solve (A1^T A1)Y + Y(A1^T A1) = -(A2^T G2 + G1^T A1) for Y
+    residual = sqrt( ||A1 Y^T + G1||_F^2 + ||A2 Y + G2||_F^2 ).
     """ 
-    device = A.device
-    dtype  = A.dtype
-    m, p = A.shape
-    _m2, n = B.shape
-    assert _m2 == m, "A and B must have same number of rows"
-    assert Gk.shape == A.shape and Gq.shape == B.shape, "G shapes must match A,B"
-
-    AtA = A.T @ A              # [p x p]
-    BtB = B.T @ B              # [n x n]
-    C   = (A.T @ Gq + Gk.T @ B)  
-
+    device = A1.device
+    dtype  = A1.dtype
+    n = A1.shape[1]
+    assert G1.shape == A1.shape and G2.shape == A2.shape and A1.shape == A2.shape
+          
+    C   = -(A2.T @ G2 + G1.T @ A1) 
+    normC  = C.pow(2).sum().sqrt().item()
+    if normC == 0.0: normC = 1.0
     # Small/medium case: solve via Kronecker.
-    if p * n <= max_kron:
-        Ip = torch.eye(p, device=device, dtype=dtype)
+    if n**2 <= max_kron:
+        A1tA1 = A1.T @ A1              
+        A2tA2 = A2.T @ A2 
+        Ip = torch.eye(n, device=device, dtype=dtype)
         In = torch.eye(n, device=device, dtype=dtype)
-        # K = I x AtA + (BtB) x I
-        K = torch.kron(In, AtA) + torch.kron(BtB, Ip)  # [(pn) x (pn)]
+        K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
         y = torch.linalg.solve(K, C.T.reshape(-1))
-        Y = y.reshape(n, p).T
+        Y = y.reshape(n, n).T
     else:
         # Large case: solve via CG
-        def M(Y):         # normal operator  M(Y) = AtA Y + Y BtB
-            return AtA @ Y + Y @ BtB
+        def M(Y):         # normal operator  
+            return A2.T @ (A2 @ Y) + (Y @ A1.T) @ A1
 
-        dA = torch.diag(AtA).clamp_min(1e-12).view(p, 1)
-        dB = torch.diag(BtB).clamp_min(1e-12).view(1, n)
+        if diag_scaling:
+            D1 = (A1 * A1).sum(dim=0).clamp_min(1e-12).unsqueeze(0)
+            D2 = (A2 * A2).sum(dim=0).clamp_min(1e-12).unsqueeze(1)
+            if debug: 
+                assert torch.allclose(D1 + D2, D2.reshape(-1, 1) @ torch.ones(1, n, device=device, dtype=dtype) \
+                              + torch.ones(n, 1, device=device, dtype=dtype) @ D1.reshape(1, -1))
+        else:
+            D1, D2 = torch.ones(1, n, device=device, dtype=dtype), torch.ones(n, 1, device=device, dtype=dtype) 
 
-        def Minv(R):      # elementwise divide by dA + dB
-            return R / (dA + dB)
-
+        def diag_precond(R):      # elementwise divide by D1 + D2
+            return R / (D1 + D2) 
+        
         # Initialization
-        Y  = torch.zeros((p, n), device=device, dtype=dtype)
+        Y  = torch.zeros((n, n), device=device, dtype=dtype)
         R  = C - M(Y)              # residual
-        Z  = Minv(R)               # preconditioned residual
+        Z  = diag_precond(R)               # preconditioned residual
         P  = Z.clone()
  
         rz_old = (R * Z).sum()
-        normC  = C.pow(2).sum().sqrt().item()
-        if normC == 0.0: normC = 1.0
 
         for k in range(1, maxit+1):
-            MP = M(P)
-            denom = (P * MP).sum()
+            W = M(P)
+            denom = (P * W).sum()
             # Guard against breakdown
-            if abs(denom) < 1e-20:
+            if abs(denom) < 1e-12:
                 if verbose: print(f"PCG breakdown at iter {k}")
                 break
 
             alpha = (rz_old / denom).item()
             Y = Y + alpha * P
-            R = R - alpha * MP
+            R = R - alpha * W
 
             if R.pow(2).sum().sqrt().item() < tol * normC:
                 break
 
-            Z = Minv(R)
+            Z = diag_precond(R)
             rz_new = (R * Z).sum()
             beta = (rz_new / rz_old).item()
             P = Z + beta * P
-            rz_old = rz_new
+            rz_old = rz_new 
 
-    # Compute residuals of the *original* equations
-    RA = A @ Y - Gq              # should be 0 if feasible
-    RB = Y @ B.T - Gk.T          # should be 0 if feasible
-    res = torch.sqrt(RA.pow(2).sum() + RB.pow(2).sum()).item() / normC
- 
+    res = torch.sqrt((A1 @ Y.T + G1).pow(2).sum() + (A2 @ Y + G2).pow(2).sum()).item() / normC
     return Y, res
+
 
 
 
