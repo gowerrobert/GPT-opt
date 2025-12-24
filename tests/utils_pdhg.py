@@ -6,7 +6,7 @@ import contextlib, json, time
 from glob import glob
 import pandas as pd
 
-from gptopt.optim.pdhg import prox_l1, pdhg_method_AB, fista_ls_l1_reg, AttnPDAdamW
+from gptopt.optim.pdhg import prox_l1, pdhg_method_AB, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
 from gptopt.train import Logging, eval_validation_loss
 from gptopt.gpt_model import CausalSelfAttention
 from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
@@ -107,7 +107,8 @@ def cvxpy_AB(G1, G2, A, B, beta, mu=0, verbose=False):
 
 
 def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,  
-                    f_star=None, max_iter=1000, stopping=True, pd_residuals=None,
+                    Z1_0=None, Z2_0=None, Y0=None,
+                    f_star=None, max_iter=1000, stopping=True, pd_residuals=pd_residuals_infty_ball,
                     eps_abs=1e-8, eps_rel=1e-8):
 
     func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2) \
@@ -119,6 +120,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     Z1_t_diag_scaling, Z2_diag_scaling, residuals_diag_scaling, _ = pdhg_method_AB(
                 prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals
             )
@@ -132,6 +134,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     Z1_t_diag_scaling_h, Z2_diag_scaling_h, residuals_diag_scaling_h, _ = pdhg_method_AB(
                 prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
                 halpern_start=2
@@ -145,6 +148,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     Z1_t_diag_scaling_reh, Z2_diag_scaling_reh, residuals_diag_scaling_reh, _ = pdhg_method_AB(
                 prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
                 halpern_start=2, reflected_pdhg=True
@@ -158,6 +162,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     Z1_t_reh, Z2_reh, residuals_reh, _ = pdhg_method_AB(
                 prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=False, pd_residuals=pd_residuals,
                 halpern_start=2, reflected_pdhg=True
@@ -171,6 +176,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     Z1_h, Z2_h, residuals_h, _ = pdhg_method_AB(
                 prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
                 halpern_start=2
@@ -182,20 +188,11 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     del Z1_h, Z2_h
 
     Z1_t_vanilla, Z2_vanilla, residuals_vanilla, _ = pdhg_method_AB(
-                prox_h_conj,
-                W_k=A,
-                W_q=B,
-                G_wk=G1,
-                G_wq=G2,
-                mu=mu_reg,
-                beta=beta,
-                max_iter=max_iter,
-                eps_abs=eps_abs,
-                eps_rel=eps_rel,
-                stopping=stopping,
-                h_conj=h_conj,
-                f_star=f_star, 
-                pd_residuals=pd_residuals
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                h_conj=h_conj, f_star=f_star, pd_residuals=pd_residuals
             )
     metrics["PDHG"] = {
         "obj": func_obj(Z1_t_vanilla, Z2_vanilla),
@@ -204,21 +201,11 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
     del Z1_t_vanilla, Z2_vanilla
 
     Z1_t_acceleration, Z2_acceleration, residuals_acceleration, _ = pdhg_method_AB(
-                prox_h_conj,
-                W_k=A,
-                W_q=B,
-                G_wk=G1,
-                G_wq=G2,
-                mu=mu_reg,
-                beta=beta,
-                max_iter=max_iter,
-                eps_abs=eps_abs,
-                eps_rel=eps_rel,
-                stopping=stopping,
-                h_conj=h_conj,
-                f_star=f_star, 
-                acceleration=True,
-                pd_residuals=pd_residuals
+                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
+                mu=mu_reg, beta=beta, max_iter=max_iter,
+                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping, h_conj=h_conj,
+                f_star=f_star, acceleration=True, pd_residuals=pd_residuals
             )
 
     metrics["PDHG Acc"] = {
@@ -257,6 +244,8 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
             print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
 
     return residuals
+
+
 
 
 def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
@@ -319,6 +308,69 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
     fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
     plt.tight_layout(rect=[0,0,0.985,1])
     return fig, axs
+
+
+def plot_residuals_cold_warm_grid_by_param(
+    residuals_cold_start,
+    residuals_warm_start,
+    param_name="beta",
+    dpi=120,
+    rel_ylim=None,
+):
+    """Cold vs warm start, side-by-side, plotting Rel residual sum (r1_rel + r2_rel).
+
+    Input: residuals_*[param][method][key] -> list
+    Y-scale: log. If rel_ylim is None, y-limits are shared per row (cold+warm combined).
+    """
+
+    def rsum(res):
+        a = res.get("r1_rel", [])
+        b = res.get("r2_rel", [])
+        L = min(len(a), len(b))
+        return [a[i] + b[i] for i in range(L)] if L else []
+
+    plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
+    pvals = sorted(set(residuals_cold_start) | set(residuals_warm_start)) or [None]
+    methods = sorted({m for D in (*residuals_cold_start.values(), *residuals_warm_start.values()) for m in D})
+    colors = {m: plt.cm.Set2(i / max(1, len(methods) - 1)) for i, m in enumerate(methods)}
+
+    fig, axs = plt.subplots(len(pvals), 2, figsize=(10, 3.2 * len(pvals)), dpi=dpi)
+    axs = np.atleast_2d(axs)
+
+    for r, pv in enumerate(pvals):
+        Dc = residuals_cold_start.get(pv, {}) if pv is not None else {}
+        Dw = residuals_warm_start.get(pv, {}) if pv is not None else {}
+
+        # Compute shared per-row y-limits from both panels.
+        if rel_ylim is None:
+            ys = [y for D in (Dc, Dw) for m in methods for y in rsum(D.get(m, {})) if y > 0]
+            row_ylim = (min(ys), max(ys)) if ys else None
+        else:
+            row_ylim = rel_ylim
+
+        for c, (label, D) in enumerate((("Cold", Dc), ("Warm", Dw))):
+            ax = axs[r, c]
+            any_ = False
+            for m in methods:
+                v = rsum(D.get(m, {}))
+                if len(v):
+                    ax.plot(v, color=colors[m]); any_ = True
+            if not any_:
+                ax.axis("off")
+                continue
+            ax.set_yscale("log")
+            if row_ylim is not None:
+                ax.set_ylim(row_ylim)
+            title = f"{plabel}={pv:g} | Rel ({label})" if pv is not None else f"Rel ({label})"
+            ax.set(title=title, xlabel="iter")
+            ax.grid(True, which="both", ls="--", alpha=0.4)
+
+    handles = [plt.Line2D([0], [0], color=colors[m], ls='-') for m in methods]
+    fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
+    plt.tight_layout(rect=[0, 0, 0.985, 1])
+    return fig, axs
+
+
 
 
 def plot_residuals_compare(all_res, dpi=120, dual_scale=False,

@@ -3,7 +3,7 @@ import torch
 from torch.optim import Optimizer
 import numpy as np
 from typing import Optional, Callable
-from .least_squares import Y_dual_feasible
+from .least_squares import Y_dual_feasible, pdhg_diagonal_scaling
 
 
 
@@ -307,7 +307,7 @@ def pdhg_method_AB(
 
 
         if t >= 1:
-            if norm_first_iter:
+            if norm_first_iter and pd_residuals is None:
                 if t == 5:
                     norm1 = r1 if r1 > 1e-8 else 1.0
                     norm2 = r2 if r2 > 1e-8 else 1.0
@@ -330,7 +330,7 @@ def pdhg_method_AB(
             if norm_first_iter and t >= 5 or not norm_first_iter:
                 residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
 
-            if stopping and pd_residuals is None:
+            if stopping and pd_residuals is None and t > 5:
                 if (r1 <= eps_abs * (Y.numel() ** 0.5) + eps_rel * norm1
                     and r2 <= eps_abs * (Z_total_size ** 0.5) + eps_rel * norm2 and t >= min_iter):
                     Z1 = Z1_new
@@ -455,52 +455,6 @@ def Y_dual_feasible2(*, A1, A2, G1, G2, max_kron=1_000, verbose=True,
 
 
 
-
-def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False):
-    device, dtype = A.device, A.dtype
-    p2, n = A.shape
-    p1, nB = B.shape 
-
-    # |B| row/col sums 
-    r_B = B.abs().sum(dim=1)                 # (p1,)
-    c_B = B.abs().sum(dim=0)                 # (n,)
-
-    # |A| row/col sums 
-    r_A = A.abs().sum(dim=1)                 # (p2,)
-    c_A = A.abs().sum(dim=0)                 # (n,)
- 
-    inv_rB = torch.where(r_B > 0, 1.0 / (r_B + eps), torch.zeros_like(r_B))
-    inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))
-    inv_c_sum = torch.where(
-        (c_B[None, :] + c_A[:, None]) > 0, 1.0 / (c_B[None, :] + c_A[:, None] + eps),
-        torch.zeros((n, n), device=device, dtype=dtype))
-
-    # Diagonal entries as broadcastable tensors: 
-    R       = eta * inv_c_sum                     # (n, n)   for Y
-    Gamma_1 = eta * inv_rB[:, None]               # (p1, 1)  for Z1 (same across its n cols)
-    Gamma_2 = eta * inv_rA[:, None]               # (p2, 1)  for Z2 (same across its n cols)
-
-    if debug:
-        assert torch.allclose(1/inv_c_sum, torch.ones(n, 1) @ c_B[None, :] + c_A[:, None] @ torch.ones(1, n)), "Column sum mismatch!"
-        print("Diagonal PDHG scaling computed.")
-        print(f"{R.mean().item():.4e} +- {R.std().item():.4e}, "
-            f"{Gamma_1.mean().item():.4e} +- {Gamma_1.std().item():.4e}, "
-            f"{Gamma_2.mean().item():.4e} +- {Gamma_2.std().item():.4e}")
-        matrix_details(A)
-        matrix_details(B)
-    return R, Gamma_1, Gamma_2 
-
-
-def matrix_details(A: torch.Tensor | None):
-    if A is None:
-        print("Matrix details: A=None (skipped)")
-        return
-    rank_tol = torch.linalg.matrix_rank(A, tol=1e-6)
-    sigma_max = torch.linalg.norm(A, ord=2)
-    fro_norm = torch.linalg.norm(A, ord='fro')
-    print(f"{A.shape=}, {rank_tol=:.4e}, {sigma_max=:.4e}, {fro_norm=:.4e}")
-
-
 def fista_ls_l1_reg(W_k: torch.Tensor | None,
                     W_q: torch.Tensor,
                     G_wk: torch.Tensor,
@@ -603,27 +557,28 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
     return X1, Z1_fista, Z2_fista, residuals
 
 
-def proj_subgrad_l1(AZ, Y, beta=1):
+def proj_subgrad_l1(AZ, Y, beta=1, abs_tol=1e-4):
     # \min_S \beta\|AZ/\beta - S\|_F s.t. S \in \partial \|\vec(Y)\|_1 
     S = torch.sign(Y)
     S[Y == 0] = torch.clamp((AZ[Y == 0]/beta), -1.0, 1.0)
     r = beta * (AZ / beta - S).pow(2).sum().sqrt().item()
-    norm = AZ.pow(2).sum().sqrt().item()
-    if norm < 1e-6: norm = 1.0
+    # norm = AZ.pow(2).sum().sqrt().item()
+    # if norm < 1e-6: norm = 1.0
+    norm = (1 + abs_tol) * S.numel() ** 0.5
     return r, r / norm
 
 
-def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu):
+def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu, abs_tol=1e-4):
     # KKT residuals 
     # h = I_{||.||_\max \leq beta}
     # 0 \in \partial h^*(Y) - \mathcal{A}(Z)
     # 0 = G + \mu Z + \mathcal{A}^*(Y)
     AZ = Z1.t() @ B + A.t() @ Z2 
-    r1, r1_rel = proj_subgrad_l1(AZ, Y, beta=beta)
+    r1, r1_rel = proj_subgrad_l1(AZ, Y, beta=beta, abs_tol=abs_tol)
     r2_1 = (G1 + mu * Z1 + B @ Y.t()).pow(2).sum().sqrt().item()
     r2_2 = (G2 + mu * Z2 + A @ Y).pow(2).sum().sqrt().item()
     r2 = (r2_1**2 + r2_2**2)**0.5 
-    norm2 = (G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item() 
+    norm2 = (G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item() + abs_tol * (2 * G1.numel())**0.5
     if norm2 < 1e-6: norm2 = 1.0
     r2_rel = r2 / norm2 
     return r1, r1_rel, r2, r2_rel
