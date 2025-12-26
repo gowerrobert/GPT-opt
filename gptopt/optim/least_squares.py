@@ -136,7 +136,7 @@ def attn_least_squares_solve(*, A1, A2, G1, G2, X_type, beta=None, Y0=None, verb
     dtype  = A1.dtype
     m, n = A1.shape
     if diag_scaling:
-        R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=A2, B=A1, eta=0.99)
+        R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=A2, B=A1, eta=0.99, agg_op="l2_norm_sq")
         R_05, Gamma_1_05, Gamma_2_05 = torch.pow(R, 0.5), torch.pow(Gamma_1, 0.5), torch.pow(Gamma_2, 0.5)
         del R, Gamma_1, Gamma_2
     else:
@@ -388,18 +388,27 @@ def cvxpy_Y_sylvester_solve(*, A1, A2, G1, G2):
 
 
 
-def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False):
+def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm"):
     device, dtype = A.device, A.dtype
     p2, n = A.shape
     p1, nB = B.shape 
 
-    # |B| row/col sums 
-    r_B = B.abs().sum(dim=1)                 # (p1,)
-    c_B = B.abs().sum(dim=0)                 # (n,)
+    if agg_op == "l1_norm":
+        # |B| row/col sums 
+        r_B = B.abs().sum(dim=1)                 # (p1,)
+        c_B = B.abs().sum(dim=0)                 # (n,)
 
-    # |A| row/col sums 
-    r_A = A.abs().sum(dim=1)                 # (p2,)
-    c_A = A.abs().sum(dim=0)                 # (n,)
+        # |A| row/col sums 
+        r_A = A.abs().sum(dim=1)                 # (p2,)
+        c_A = A.abs().sum(dim=0)                 # (n,)
+    elif agg_op == "l2_norm_sq":
+        # |B| row/col sums 
+        r_B = B.pow(2).sum(dim=1)                 # (p1,)
+        c_B = B.pow(2).sum(dim=0)                 # (n,)
+
+        # |A| row/col sums 
+        r_A = A.pow(2).sum(dim=1)                 # (p2,)
+        c_A = A.pow(2).sum(dim=0)                 # (n,)
  
     inv_rB = torch.where(r_B > 0, 1.0 / (r_B + eps), torch.zeros_like(r_B))
     inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))

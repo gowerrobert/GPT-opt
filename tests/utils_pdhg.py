@@ -122,7 +122,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals
+                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals, norm_first_iter=False
             )
     metrics["PDHG DS"] = {
         "obj": func_obj(Z1_t_diag_scaling, Z2_diag_scaling),
@@ -137,7 +137,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2
+                halpern_start=2, norm_first_iter=False
             )
     metrics["HPDHG DS"] = {
         "obj": func_obj(Z1_t_diag_scaling_h, Z2_diag_scaling_h),
@@ -151,7 +151,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2, reflected_pdhg=True
+                halpern_start=2, reflected_pdhg=True, norm_first_iter=False
             )
     metrics["reHPDHG DS"] = {
         "obj": func_obj(Z1_t_diag_scaling_reh, Z2_diag_scaling_reh),
@@ -165,7 +165,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=False, pd_residuals=pd_residuals,
-                halpern_start=2, reflected_pdhg=True
+                halpern_start=2, reflected_pdhg=True, norm_first_iter=False
             )
     metrics["reHPDHG"] = {
         "obj": func_obj(Z1_t_reh, Z2_reh),
@@ -179,7 +179,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2
+                halpern_start=2, norm_first_iter=False
             )
     metrics["HPDHG"] = {
         "obj": func_obj(Z1_h, Z2_h),
@@ -192,7 +192,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, pd_residuals=pd_residuals
+                h_conj=h_conj, f_star=f_star, pd_residuals=pd_residuals, norm_first_iter=False
             )
     metrics["PDHG"] = {
         "obj": func_obj(Z1_t_vanilla, Z2_vanilla),
@@ -205,7 +205,7 @@ def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,
                 mu=mu_reg, beta=beta, max_iter=max_iter,
                 Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping, h_conj=h_conj,
-                f_star=f_star, acceleration=True, pd_residuals=pd_residuals
+                f_star=f_star, acceleration=True, pd_residuals=pd_residuals, norm_first_iter=False
             )
 
     metrics["PDHG Acc"] = {
@@ -257,7 +257,7 @@ def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
 
 
 def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi=120,
-                                 abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
+                                 abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None, add_res=True):
     plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
     pvals = sorted(res_all) if len(res_all) else []
     methods = sorted({m for D in res_all.values() for m in D})
@@ -271,9 +271,16 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
     fig, axs = plt.subplots(max(1, len(pvals)), ncols, figsize=(5*ncols, 3.2*max(1, len(pvals))), dpi=dpi)
     axs = np.atleast_2d(axs)
 
+    if add_res:
+        abs_keys = [("r_sum", "-")]
+        rel_keys = [("r_rel_sum", "-")]
+    else:
+        abs_keys = [("r1", "-"), ("r2", "--")]
+        rel_keys = [("r1_rel", "-"), ("r2_rel", "--")]
+
     specs = [
-        (0, [("r1","-"),("r2","--")], abs_ylim, "Abs", "log"),
-        (1, [("r1_rel","-"),("r2_rel","--")], rel_ylim, "Rel", "log"),
+        (0, abs_keys, abs_ylim, "Abs", "log"),
+        (1, rel_keys, rel_ylim, "Rel", "log"),
     ]
     if has_gap:
         specs.append((2, [("rel_gap",":")], gap_ylim, "Gap", "log"))
@@ -288,7 +295,16 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
             for m in methods:
                 res = D.get(m, {})
                 for k, ls in keys:
-                    v = res.get(k, [])
+                    if k == "r_sum":
+                        a1, a2 = res.get("r1", []), res.get("r2", [])
+                        L = min(len(a1), len(a2))
+                        v = [a1[i] + a2[i] for i in range(L)] if L else []
+                    elif k == "r_rel_sum":
+                        a1, a2 = res.get("r1_rel", []), res.get("r2_rel", [])
+                        L = min(len(a1), len(a2))
+                        v = [a1[i] + a2[i] for i in range(L)] if L else []
+                    else:
+                        v = res.get(k, [])
                     if len(v):
                         a.plot(v, color=colors[m], ls=ls); any_ = True
             if any_:
@@ -482,35 +498,71 @@ def make_output_path_hydra(config, output_dir):
     return os.path.join(output_dir, file_name + ".json")
 
 
-def plot_residuals_layers(residuals_by_layer, dual_scale=False):
+def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg_sum=False, plot_res=['abs', 'rel']):
     layers = sorted(residuals_by_layer.keys())
-    has_dual = any('dual_vals' in v for v in residuals_by_layer.values())
-    ncols = 3 if has_dual else 2 
-    fig, ax = plt.subplots(len(layers), ncols, figsize=(4*ncols, 3*len(layers)), sharex=True)
-    if len(layers) == 1: ax = ax.reshape(1, -1)
-    specs = [('r1','r2','Abs',r'$r_1$',r'$r_2$'), ('r1_rel','r2_rel','Rel',r'$r_1^{rel}$',r'$r_2^{rel}$')]
+    want = {str(x).lower() for x in (plot_res or [])}
+
+    ordered = [k for k in ('abs', 'rel') if k in want]
+    has_dual = ('dual' in want) and any('dual_vals' in v and len(v.get('dual_vals', [])) for v in residuals_by_layer.values())
+    if has_dual:
+        ordered.append('dual')
+
+    nrows = max(1, len(layers))
+    ncols = max(1, len(ordered))
+    fig, ax = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows), sharex=True)
+    ax = np.asarray(ax).reshape(nrows, ncols)
+
+    def plot1(a, y, label=None):
+        if not len(y):
+            return False
+        kw = {"marker": 'o'} if len(y) == 1 else {}
+        if label is not None:
+            kw["label"] = label
+        a.plot(y, **kw)
+        return True
+
+    def add2(u, v):
+        L = min(len(u), len(v))
+        return [u[i] + v[i] for i in range(L)] if L else []
+
     for r, layer in enumerate(layers):
         lr = residuals_by_layer[layer]
-        c = 0
-        for k1,k2,title,l1,l2 in specs:
-            d1,d2 = lr.get(k1,[]), lr.get(k2,[])
-            if len(d1) or len(d2):
-                if len(d1): ax[r,c].plot(d1,label=l1)
-                if len(d2): ax[r,c].plot(d2,label=l2)
-                ax[r,c].set(yscale='log',title=f"Layer {layer}-{title}",xlabel='iter'); ax[r,c].grid(True,which='both',ls='--',alpha=0.4); ax[r,c].legend()
-                c += 1
-        if has_dual and 'dual_vals' in lr:
-            ax[r,c].plot(lr['dual_vals']); 
-            if dual_scale:
-                ax[r,c].set_yscale("symlog", linthresh=1e-6)
-            # ax[r,c].set_yscale('symlog',linthresh=1e-6)
-            ax[r,c].set(title=f"Layer {layer}-dual",xlabel='iter'); ax[r,c].grid(True,which='both',ls='--',alpha=0.4)
+        for c, key in enumerate(ordered):
+            a = ax[r, c]
+            any_ = False
+            if key in {'abs', 'rel'}:
+                k1, k2 = ('r1', 'r2') if key == 'abs' else ('r1_rel', 'r2_rel')
+                d1, d2 = lr.get(k1, []), lr.get(k2, [])
+                if agg_sum:
+                    lbl = r'$r_1+r_2$' if key == 'abs' else r'$r_1^{rel}+r_2^{rel}$'
+                    any_ |= plot1(a, add2(d1, d2), lbl)
+                else:
+                    lbl1, lbl2 = (r'$r_1$', r'$r_2$') if key == 'abs' else (r'$r_1^{rel}$', r'$r_2^{rel}$')
+                    any_ |= plot1(a, d1, lbl1)
+                    any_ |= plot1(a, d2, lbl2)
+                if any_:
+                    if yscale:
+                        a.set(yscale='log', title=f"Layer {layer}-{'Abs' if key == 'abs' else 'Rel'}", xlabel='iter')
+                    a.grid(True, which='both', ls='--', alpha=0.4)
+                    a.legend()
+            else:  # dual
+                any_ |= plot1(a, lr.get('dual_vals', []))
+                if any_:
+                    if dual_scale:
+                        a.set_yscale('symlog', linthresh=1e-6)
+                    a.set(title=f"Layer {layer}-dual", xlabel='iter')
+                    a.grid(True, which='both', ls='--', alpha=0.4)
+
+            if not any_:
+                a.axis('off')
+
     plt.tight_layout()
+
 
 
 def train(train_dataloader, val_dataloader, model, optimizer, training_params, 
           logging_params, scheduler=None, ckpt_dir="", wandb_run=None,
-          number_of_batches=1):
+          number_of_batches=np.inf):
     typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
     record_pdhg_info = [0, 10, 100]
@@ -786,7 +838,8 @@ def main(config: DictConfig):
     model_copy = copy.deepcopy(model).to(device)
     opt_name = opt_config["name"]
     # Setup optimizer: allow using local AttnPDAdamW in this test
-    if opt_name in ["attn_pd_adamw", "attn_fista_adamw", "attn_rehpdhg_adamw"]:
+    if opt_name in ["attn_pd_adamw_warm_start", "attn_pd_adamw", "attn_pd_adamw_warm_start_only", 
+                    "attn_fista_adamw", "attn_rehpdhg_adamw"]:
         lr = float(opt_config.get("lr", 1e-3))
         betas = tuple(opt_config.get("betas", (0.9, 0.999)))
         eps = float(opt_config.get("eps", 1e-8))
@@ -809,6 +862,7 @@ def main(config: DictConfig):
             pd_type=opt_config.get("pd_type", "pdhg"),
             halpern_start=opt_config.get("halpern_start", 5),
             reflected_pdhg=opt_config.get("reflected_pdhg", False),
+            warm_start=opt_config.get("warm_start", False),
         )
         use_my_adamw = True
     else:

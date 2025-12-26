@@ -1,14 +1,14 @@
 optimizer_params:
-  name: attn_pd_adamw
+  name: attn_pd_adamw_warm_start_only
   lr: 0.001
   betas: [0.95, 0.95]
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
   max_norm_tr: 0.01
-  pdhg_max_iter: 100
+  pdhg_max_iter: 0
   momentum: false 
   diag_scaling: true 
   acceleration: false
-  warm_start: false
+  warm_start: true
   pd_type: "pdhg" # "fista",  "pdhg"

@@ -3,7 +3,7 @@ import torch
 from torch.optim import Optimizer
 import numpy as np
 from typing import Optional, Callable
-from .least_squares import Y_dual_feasible, pdhg_diagonal_scaling
+from .least_squares import Y_dual_feasible, pdhg_diagonal_scaling, attn_least_squares_solve
 
 
 
@@ -29,6 +29,7 @@ class AttnPDAdamW(Optimizer):
         pd_type="pdhg",
         halpern_start: int = np.inf,
         reflected_pdhg: bool = False,
+        warm_start: bool = False,
     ):
         params = []
         self.name_by_param = {}
@@ -52,10 +53,11 @@ class AttnPDAdamW(Optimizer):
             pd_type=pd_type,
             halpern_start=halpern_start,
             reflected_pdhg=reflected_pdhg,
+            warm_start=warm_start
         )
         print(
             f"[AttnPDAdamW] lr={lr}, betas={betas}, eps={eps}, wd={weight_decay}, "
-            f"qk_lr_scale={qk_lr_scale}, max_norm_tr={max_norm_tr}, pdhg_iters={pdhg_max_iter}, "
+            f"qk_lr_scale={qk_lr_scale}, max_norm_tr={max_norm_tr}, pdhg_iters={pdhg_max_iter}, {warm_start=}"
             f"\n    momentum={momentum}, diag_scaling={diag_scaling}, accel={acceleration}, {pd_type=}, {halpern_start=}, {reflected_pdhg=}"
         )
         super().__init__(params, defaults)
@@ -117,8 +119,8 @@ class AttnPDAdamW(Optimizer):
                     W_q, G_q = p[:n_embed, :],                  g[:n_embed, :]
                     W_k, G_k = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
                     W_v, G_v = p[2 * n_embed: 3 * n_embed, :],  g[2 * n_embed: 3 * n_embed, :]
-                    Y0, dual_feas_res = Y_dual_feasible(A2=W_k, A1=W_q, G1=G_k, G2=G_q, maxit=20)
-                    print(f"{dual_feas_res=}, ||Y0||_F={Y0.pow(2).sum().item():.4e}")
+                    # Y0, dual_feas_res = Y_dual_feasible(A2=W_k, A1=W_q, G1=G_k, G2=G_q, maxit=20)
+                    # print(f"{dual_feas_res=}, ||Y0||_F={Y0.pow(2).sum().item():.4e}")
                     # Y0 = torch.randn(W_q.shape[0], W_k.shape[0], device=W_q.device, dtype=W_q.dtype) * 1e-3
                     # print(f"|Y0||_F={Y0.pow(2).sum().item():.4e}")
                     nA = W_k.pow(2).sum().sqrt().item()
@@ -137,9 +139,18 @@ class AttnPDAdamW(Optimizer):
                     # Y0 = None
                     if pd_type == "pdhg": 
                         # Z1_0=-G_k; Z2_0=-G_q
-                        Z1_0, Z2_0 = None, None
+                        # Z1_0, Z2_0 = None, None
+                        if group["warm_start"]:
+                            Y0, _ = Y_dual_feasible(A1=W_q, A2=W_k, G1=G_k, G2=G_q, method="lsqr", maxit=100) 
+                            (Z1_0, Z2_0), res = attn_least_squares_solve(A1=W_q, A2=W_k, G1=G_k, G2=G_q, 
+                                                                   X_type="Z", Y0=Y0, beta=group["max_norm_tr"], 
+                                                tol=1e-10, maxit=100, diag_scaling=True)
+                        else:
+                            Y0, Z1_0, Z2_0 = None, None, None
+ 
                         # Run torch PDHG
-                        Z1_t, Z2_t, residuals, norm_Y = pdhg_method_AB(
+                        if pdhg_max_iter >= 1:
+                            Z1_t, Z2_t, residuals, norm_Y = pdhg_method_AB(
                             prox_h_conj,
                             W_k=W_k, W_q=W_q, G_wk=G_k, G_wq=G_q,
                             max_iter=pdhg_max_iter, lamb_max=lamb_max, beta=group["max_norm_tr"],
@@ -149,6 +160,14 @@ class AttnPDAdamW(Optimizer):
                             h_conj=h_conj, pd_residuals=pd_residuals_infty_ball,
                             halpern_start=group["halpern_start"], reflected_pdhg=group["reflected_pdhg"]
                         )
+                        else:
+                            Z1_t, Z2_t = Z1_0, Z2_0
+                            residuals = res
+                            r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
+                                A=W_k, B=W_q, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G_k, G2=G_q,
+                                beta=group["max_norm_tr"], mu=mu_reg)
+                            residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel]}
+                            norm_Y = Y0.pow(2).sum().sqrt().item()
                     elif pd_type == "fista":
                         Y_fista, Z1_t, Z2_t, residuals = fista_ls_l1_reg(
                             W_k=W_k, W_q=W_q, G_wk=G_k, G_wq=G_q,
@@ -233,7 +252,7 @@ def pdhg_method_AB(
     h_conj= None,
     f_star: float | None = None,
     pd_residuals: Optional[callable] = None,
-    norm_first_iter: bool = True,
+    norm_first_iter: bool = False,
     halpern_start: int = np.inf,
     reflected_pdhg: bool = False,
     ):
@@ -282,6 +301,13 @@ def pdhg_method_AB(
         Gamma_1 = gamma * torch.ones((W_q.shape[0], 1), device=W_q.device, dtype=W_q.dtype) 
         Gamma_2 = gamma * torch.ones((W_k.shape[0], 1), device=W_k.device, dtype=W_k.dtype) if use_Z2 else None
 
+    if pd_residuals is not None:
+        r1, r1_rel, r2, r2_rel = pd_residuals(
+                A=W_k, B=W_q, Y=Y, Z1=Z1, Z2=Z2, G1=G_wk, G2=G_wq,
+                beta=beta, mu=mu)
+        residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
+        residuals['r1'].append(r1); residuals['r2'].append(r2)
+    
     for t in range(max_iter):
         if use_Z2:
             Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ W_q + W_k.t() @ Z2_bar), 1, R=R)
@@ -303,11 +329,12 @@ def pdhg_method_AB(
             r1, r1_rel, r2, r2_rel = pd_residuals(
             A=W_k, B=W_q, Y=Y_new, Z1=Z1_new, Z2=Z2_new, G1=G_wk, G2=G_wq,
             beta=beta, mu=mu)
+            # residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
         residuals['r1'].append(r1); residuals['r2'].append(r2)
 
-
         if t >= 1:
-            if norm_first_iter and pd_residuals is None:
+            if norm_first_iter:
+                # normalize by first iter residual
                 if t == 5:
                     norm1 = r1 if r1 > 1e-8 else 1.0
                     norm2 = r2 if r2 > 1e-8 else 1.0
@@ -316,6 +343,7 @@ def pdhg_method_AB(
                     r2_rel = r2 / norm2 
 
             if pd_residuals is None and not norm_first_iter:
+                # normalize using parts of the residuals
                 if use_Z2:
                     norm1 = ((Z1_new.t() @ W_q + W_k.t() @ Z2_new).pow(2).sum()).sqrt().item()
                     norm2 = ((W_q @ Y_new.t()).pow(2).sum() + (W_k @ Y_new).pow(2).sum()).sqrt().item()
@@ -327,17 +355,17 @@ def pdhg_method_AB(
                 r1_rel = max(1e-8, r1 - eps_abs * (Y.numel() ** 0.5)) / norm1
                 r2_rel = max(1e-8, r2 - eps_abs * (Z_total_size ** 0.5) ) / norm2 
             
-            if norm_first_iter and t >= 5 or not norm_first_iter:
+            if (norm_first_iter and t >= 5) or not norm_first_iter:
                 residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
 
-            if stopping and pd_residuals is None and t > 5:
-                if (r1 <= eps_abs * (Y.numel() ** 0.5) + eps_rel * norm1
-                    and r2 <= eps_abs * (Z_total_size ** 0.5) + eps_rel * norm2 and t >= min_iter):
-                    Z1 = Z1_new
-                    if use_Z2:
-                        Z2 = Z2_new
-                    Y = Y_new 
-                    break
+        if stopping and pd_residuals is None and t > 5:
+            if (r1 <= eps_abs * (Y.numel() ** 0.5) + eps_rel * norm1
+                and r2 <= eps_abs * (Z_total_size ** 0.5) + eps_rel * norm2 and t >= min_iter):
+                Z1 = Z1_new
+                if use_Z2:
+                    Z2 = Z2_new
+                Y = Y_new 
+                break
                 
         if acceleration and not diag_scaling:
             theta = 1 / (1 + 2 * gamma * mu)**0.5
