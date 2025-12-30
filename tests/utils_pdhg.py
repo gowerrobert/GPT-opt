@@ -94,16 +94,17 @@ def cvxpy_A(g, A, beta, mu=0):
 
 
 def cvxpy_AB(G1, G2, A, B, beta, mu=0, verbose=False):
-    Z1, Z2 = cp.Variable(A.shape), cp.Variable(B.shape)
+    Z1, Z2, X = cp.Variable(A.shape), cp.Variable(B.shape), cp.Variable((A.shape[1], B.shape[1]))
     obj = cp.trace(G1.T @ Z1) + cp.trace(G2.T @ Z2)
     if mu > 0:
         obj += (mu / 2) * (cp.sum_squares(Z1) + cp.sum_squares(Z2))
     objective = cp.Minimize(obj)
-    constraints = [cp.max(cp.abs(Z1.T @ B + A.T @ Z2)) <= beta]
+    constraints = [Z1.T @ B + A.T @ Z2 == X, 
+                   cp.max(cp.abs(X)) <= beta]
     prob = cp.Problem(objective, constraints)
     prob.solve(solver=cp.CLARABEL, verbose=verbose)
     assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
-    return Z1.value, Z2.value, obj.value
+    return Z1.value, Z2.value, obj.value, constraints[0].dual_value
 
 
 def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,  

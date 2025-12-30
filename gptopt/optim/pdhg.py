@@ -2,8 +2,76 @@
 import torch
 from torch.optim import Optimizer
 import numpy as np
-from typing import Optional, Callable
+from typing import Optional, Callable, Literal, Any
 from .least_squares import Y_dual_feasible, pdhg_diagonal_scaling, attn_least_squares_solve
+
+
+class PDHGResidualRecorder: 
+
+    def __init__(
+        self,
+        *,
+        pd_residuals: Optional[Callable[..., tuple[float, float, float, float]]] = None,
+        mu: float = 0.0,
+        f_star: float | None = None,
+        normalize: Literal["none", "by_first"] = "none",
+        warmup_iters: int = 5,
+        eps: float = 1e-8,
+        **pd_residuals_kwargs: Any,
+    ):
+        self.pd_residuals = pd_residuals
+        self.kw = dict(pd_residuals_kwargs)
+        self.mu = float(self.kw.get("mu", mu))
+        self.kw.setdefault("mu", self.mu)
+        self.f_star = f_star
+        self.normalize = normalize
+        self.warmup_iters = int(warmup_iters)
+        self.eps = float(eps)
+
+        self.r1: list[float] = []
+        self.r2: list[float] = []
+        self.r1_rel: list[float] = []
+        self.r2_rel: list[float] = []
+        self.dual_vals: list[float] = []
+        self.rel_gap: list[float] = []
+        self._norm1: float | None = None
+        self._norm2: float | None = None
+
+
+    def update(self, t: int, *, r1: float, r2: float, r1_rel=None, r2_rel=None, dual_val=None) -> None:
+        self.r1.append(r1); self.r2.append(r2)
+
+        if self.normalize == "by_first" and self._norm1 is None and t >= self.warmup_iters:
+            self._norm1 = max(r1, self.eps)
+            self._norm2 = max(r2, self.eps)
+        if (r1_rel is None or r2_rel is None) and self.normalize == "by_first" and self._norm1 is not None:
+            r1_rel, r2_rel = r1 / self._norm1, r2 / self._norm2
+        if r1_rel is not None and r2_rel is not None:
+            self.r1_rel.append(r1_rel); self.r2_rel.append(r2_rel)
+
+        if dual_val is not None: 
+            self.dual_vals.append(dual_val)
+            if self.f_star is not None:
+                self.rel_gap.append(np.abs(self.f_star - dual_val) / (abs(self.f_star) + 1e-12))
+
+    def record(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, dual_val=None):
+        r1, r1_rel, r2, r2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
+        self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, dual_val=dual_val)
+        return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
+
+    def as_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"r1": self.r1, "r2": self.r2, "r1_rel": self.r1_rel, "r2_rel": self.r2_rel}
+        if self.mu > 0:
+            d["dual_vals"] = self.dual_vals
+        if self.f_star is not None:
+            d["rel_gap"] = self.rel_gap
+        return d
+
+    def get(self, key: str, default=None):
+        return self.as_dict().get(key, default)
+
+    def __getitem__(self, key: str):
+        return self.as_dict()[key]
 
 
 
@@ -116,43 +184,45 @@ class AttnPDAdamW(Optimizer):
                     # interpret rows as [Q; K; V]
                     n_embed = p.shape[1] 
                     assert p.shape[0] == 3 * n_embed, print(f"{p.shape}")
-                    W_q, G_q = p[:n_embed, :],                  g[:n_embed, :]
-                    W_k, G_k = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
+                    A1, G2 = p[:n_embed, :],                  g[:n_embed, :]
+                    A2, G1 = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
                     W_v, G_v = p[2 * n_embed: 3 * n_embed, :],  g[2 * n_embed: 3 * n_embed, :]
-                    # Y0, dual_feas_res = Y_dual_feasible(A2=W_k, A1=W_q, G1=G_k, G2=G_q, maxit=20)
+                    # Y0, dual_feas_res = Y_dual_feasible(A2=A2, A1=A1, G1=G1, G2=G2, maxit=20)
                     # print(f"{dual_feas_res=}, ||Y0||_F={Y0.pow(2).sum().item():.4e}")
-                    # Y0 = torch.randn(W_q.shape[0], W_k.shape[0], device=W_q.device, dtype=W_q.dtype) * 1e-3
+                    # Y0 = torch.randn(A1.shape[0], A2.shape[0], device=A1.device, dtype=A1.dtype) * 1e-3
                     # print(f"|Y0||_F={Y0.pow(2).sum().item():.4e}")
-                    nA = W_k.pow(2).sum().sqrt().item()
-                    nB = W_q.pow(2).sum().sqrt().item()
+                    nA = A2.pow(2).sum().sqrt().item()
+                    nB = A1.pow(2).sum().sqrt().item()
                     lamb_max = (nA * nA + nB * nB) ** 0.5
-                    # mu_max = (G_k.t() @ W_q + W_k.t() @ G_q).abs().max().item() / group["max_norm_tr"]
+                    # mu_max = (G1.t() @ A1 + A2.t() @ G2).abs().max().item() / group["max_norm_tr"]
                     # mu_reg = max(0.1 * mu_max, 1e-6)
                     mu_reg = 0
                     # print(f"{lamb_max=:.4e}, {mu_reg=:.4e}, {mu_max=:.4e}")
                     # PDHG to update key-query  
                     prox_h_conj = lambda y, rho, R: prox_l1(y, rho * group["max_norm_tr"], R=R)
                     h_conj = lambda y: group["max_norm_tr"] * torch.abs(y).sum()
-                    assert W_q.shape == G_q.shape and W_k.shape == G_k.shape, \
-                        print(f"{W_q.shape=}, {G_q.shape=}, {W_k.shape=}, {G_k.shape=}")
-                    # Y0 = 0.001 * torch.randn((W_k.shape[1], W_q.shape[1]), device=W_k.device, dtype=W_k.dtype)
+                    assert A1.shape == G2.shape and A2.shape == G1.shape, \
+                        print(f"{A1.shape=}, {G2.shape=}, {A2.shape=}, {G1.shape=}")
+                    # Y0 = 0.001 * torch.randn((A2.shape[1], A1.shape[1]), device=A2.device, dtype=A2.dtype)
                     # Y0 = None
                     if pd_type == "pdhg": 
-                        # Z1_0=-G_k; Z2_0=-G_q
+                        # Z1_0=-G1; Z2_0=-G2
                         # Z1_0, Z2_0 = None, None
                         if group["warm_start"]:
-                            Y0, _ = Y_dual_feasible(A1=W_q, A2=W_k, G1=G_k, G2=G_q, method="lsqr", maxit=100) 
-                            (Z1_0, Z2_0), res = attn_least_squares_solve(A1=W_q, A2=W_k, G1=G_k, G2=G_q, 
+                            Y0, _ = Y_dual_feasible(A1=A1, A2=A2, G1=G1, G2=G2, method="lsqr", maxit=100) 
+                            (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
                                                                    X_type="Z", Y0=Y0, beta=group["max_norm_tr"], 
                                                 tol=1e-10, maxit=100, diag_scaling=True)
                         else:
                             Y0, Z1_0, Z2_0 = None, None, None
  
                         # Run torch PDHG
+                        # A1=W_q, A2=W_k
+                        # G1=G_k, G2=G_q
                         if pdhg_max_iter >= 1:
                             Z1_t, Z2_t, residuals, norm_Y = pdhg_method_AB(
                             prox_h_conj,
-                            W_k=W_k, W_q=W_q, G_wk=G_k, G_wq=G_q,
+                            A2=A2, A1=A1, G1=G1, G2=G2,
                             max_iter=pdhg_max_iter, lamb_max=lamb_max, beta=group["max_norm_tr"],
                             mu=mu_reg, eps_abs=1e-6, eps_rel=1e-12, stopping=False, min_iter=500,
                             Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
@@ -164,13 +234,13 @@ class AttnPDAdamW(Optimizer):
                             Z1_t, Z2_t = Z1_0, Z2_0
                             residuals = res
                             r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
-                                A=W_k, B=W_q, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G_k, G2=G_q,
+                                A=A2, B=A1, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G1, G2=G2,
                                 beta=group["max_norm_tr"], mu=mu_reg)
                             residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel]}
                             norm_Y = Y0.pow(2).sum().sqrt().item()
                     elif pd_type == "fista":
                         Y_fista, Z1_t, Z2_t, residuals = fista_ls_l1_reg(
-                            W_k=W_k, W_q=W_q, G_wk=G_k, G_wq=G_q,
+                            A2=A2, A1=A1, G1=G1, G2=G2,
                             beta=group["max_norm_tr"], mu=mu_reg, 
                             lamb_max=lamb_max, max_iter=pdhg_max_iter,
                             eps_abs=1e-6, eps_rel=1e-12, stopping=False,
@@ -178,12 +248,12 @@ class AttnPDAdamW(Optimizer):
                         )
                         norm_Y = Y_fista.pow(2).sum().sqrt().item()
                     
-                    W_k.data.copy_(Z1_t)
-                    W_q.data.copy_(Z2_t)
-                    residuals["W_q_norm"] = W_q.norm().item()
-                    residuals["W_k_norm"] = W_k.norm().item()
-                    residuals["G_k_norm"] = G_k.norm().item()
-                    residuals["G_q_norm"] = G_q.norm().item()
+                    A2.data.copy_(Z1_t)
+                    A1.data.copy_(Z2_t)
+                    residuals["A1_norm"] = A1.norm().item()
+                    residuals["A2_norm"] = A2.norm().item()
+                    residuals["G1_norm"] = G1.norm().item()
+                    residuals["G2_norm"] = G2.norm().item()
                     residuals["Y_norm"] = norm_Y
                     residuals_n_layers[n_att_layers] = residuals
                     n_att_layers += 1
@@ -228,13 +298,21 @@ def prox_l1(x, beta, R=None):
     return torch.sign(x) * torch.clamp(torch.abs(x) - threshold, min=0.0)
 
 
+def mathcal_A_linop(*, A1, A2, Z): # A operator
+    m = A1.shape[0]
+    return Z[:m, :].T @ A1 + A2.T @ Z[m:, :]
+       
+        
+def mathcal_A_adj_linop(*, A1, A2, Y):         # A^* operator  
+    return torch.cat([A1 @ Y.T, A2 @ Y], dim=0)
+
 
 def pdhg_method_AB(
     prox_h_conj,
-    W_k: torch.Tensor | None,
-    W_q: torch.Tensor,
-    G_wk: torch.Tensor,
-    G_wq: torch.Tensor | None,
+    A2: torch.Tensor | None,
+    A1: torch.Tensor,
+    G1: torch.Tensor,
+    G2: torch.Tensor | None,
     beta: float,
     mu: float = 0.0,
     lamb_max=None,
@@ -256,38 +334,35 @@ def pdhg_method_AB(
     halpern_start: int = np.inf,
     reflected_pdhg: bool = False,
     ):
-    use_Z2 = not ((W_k is None) or (G_wq is None) ) 
+    use_Z2 = not ((A2 is None) or (G2 is None) ) 
     if lamb_max is None:
-        nA = W_q.pow(2).sum().sqrt().item()
+        nA = A1.pow(2).sum().sqrt().item()
         if use_Z2:
-            nB = W_k.pow(2).sum().sqrt().item()
+            nB = A2.pow(2).sum().sqrt().item()
             lamb_max = (nA * nA + nB * nB) ** 0.5
         else:
             lamb_max = nA
         print(f"{lamb_max=}")
     rho = gamma = max(min(0.99 / (lamb_max + 1e-12), 1e4), 1e-5)
-    m, n = W_q.shape
+    m, n = A1.shape
     residuals = {"r1": [], "r2": [], "r1_rel": [], "r2_rel": [], "dual_vals":[], "rel_gap":[]}
     if mu == 0.0:
         residuals.pop("dual_vals")
 
-    # matrix_details(G_wk)
-    # if use_Z2: matrix_details(G_wq)
- 
     if Z1_0 is not None:
         Z1 = Z1_0
     else:
-        Z1 = torch.zeros_like(G_wk)
+        Z1 = torch.zeros_like(G1)
     Z1_bar = Z1.clone()
     if Y0 is not None:
         Y = Y0
     else:
-        Y = torch.zeros((Z1.shape[1], W_q.shape[1]), device=G_wk.device, dtype=G_wk.dtype)
+        Y = torch.zeros((Z1.shape[1], A1.shape[1]), device=G1.device, dtype=G1.dtype)
     if use_Z2:
         if Z2_0 is not None:
             Z2 = Z2_0
         else:
-            Z2 = torch.zeros_like(G_wq) 
+            Z2 = torch.zeros_like(G2) 
         Z2_bar = Z2.clone()
         Z_total_size = Z1.numel() + Z2.numel()
     else:
@@ -295,39 +370,39 @@ def pdhg_method_AB(
         Z_total_size = Z1.numel()
 
     if diag_scaling:
-        R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=W_k, B=W_q, eta=0.99)
+        R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=A2, B=A1, eta=0.99)
     else:
         R = rho * torch.ones((Y.shape[0], Y.shape[1]), device=Y.device, dtype=Y.dtype)
-        Gamma_1 = gamma * torch.ones((W_q.shape[0], 1), device=W_q.device, dtype=W_q.dtype) 
-        Gamma_2 = gamma * torch.ones((W_k.shape[0], 1), device=W_k.device, dtype=W_k.dtype) if use_Z2 else None
+        Gamma_1 = gamma * torch.ones((A1.shape[0], 1), device=A1.device, dtype=A1.dtype) 
+        Gamma_2 = gamma * torch.ones((A2.shape[0], 1), device=A2.device, dtype=A2.dtype) if use_Z2 else None
 
     if pd_residuals is not None:
         r1, r1_rel, r2, r2_rel = pd_residuals(
-                A=W_k, B=W_q, Y=Y, Z1=Z1, Z2=Z2, G1=G_wk, G2=G_wq,
+                A=A2, B=A1, Y=Y, Z1=Z1, Z2=Z2, G1=G1, G2=G2,
                 beta=beta, mu=mu)
         residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
         residuals['r1'].append(r1); residuals['r2'].append(r2)
     
     for t in range(max_iter):
         if use_Z2:
-            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ W_q + W_k.t() @ Z2_bar), 1, R=R)
-            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (W_q @ Y_new.t() + G_wk))
-            Z2_new = (1 / (1 + Gamma_2 * mu)) * (Z2 - Gamma_2 * (W_k @ Y_new + G_wq))
+            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ A1 + A2.t() @ Z2_bar), 1, R=R)
+            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (A1 @ Y_new.t() + G1))
+            Z2_new = (1 / (1 + Gamma_2 * mu)) * (Z2 - Gamma_2 * (A2 @ Y_new + G2))
         else: 
-            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ W_q), 1, R=R)  
-            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (W_q @ Y_new.t() + G_wk))
+            Y_new = prox_h_conj(Y + R * (Z1_bar.t() @ A1), 1, R=R)  
+            Z1_new = (1 / (1 + Gamma_1 * mu)) * (Z1 - Gamma_1 * (A1 @ Y_new.t() + G1))
         
         if pd_residuals is None:
             if use_Z2:
-                r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ W_q)
-                                            - R * (W_k.t() @ (Z2_bar - Z2_new)))).pow(2).sum().sqrt().item()
+                r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ A1)
+                                            - R * (A2.t() @ (Z2_bar - Z2_new)))).pow(2).sum().sqrt().item()
                 r2 = (((Z1_new - Z1) / Gamma_1).pow(2).sum() + ((Z2_new - Z2) / Gamma_2).pow(2).sum()).sqrt().item()
             else:
-                r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ W_q))).pow(2).sum().sqrt().item()
+                r1 = ((1 / R) * ( Y_new - Y - R * ((Z1_bar - Z1_new).t() @ A1))).pow(2).sum().sqrt().item()
                 r2 = ((Z1_new - Z1) / Gamma_1).pow(2).sum().sqrt().item()
         else:
             r1, r1_rel, r2, r2_rel = pd_residuals(
-            A=W_k, B=W_q, Y=Y_new, Z1=Z1_new, Z2=Z2_new, G1=G_wk, G2=G_wq,
+            A=A2, B=A1, Y=Y_new, Z1=Z1_new, Z2=Z2_new, G1=G1, G2=G2,
             beta=beta, mu=mu)
             # residuals["r1_rel"].append(r1_rel); residuals["r2_rel"].append(r2_rel) 
         residuals['r1'].append(r1); residuals['r2'].append(r2)
@@ -345,11 +420,11 @@ def pdhg_method_AB(
             if pd_residuals is None and not norm_first_iter:
                 # normalize using parts of the residuals
                 if use_Z2:
-                    norm1 = ((Z1_new.t() @ W_q + W_k.t() @ Z2_new).pow(2).sum()).sqrt().item()
-                    norm2 = ((W_q @ Y_new.t()).pow(2).sum() + (W_k @ Y_new).pow(2).sum()).sqrt().item()
+                    norm1 = ((Z1_new.t() @ A1 + A2.t() @ Z2_new).pow(2).sum()).sqrt().item()
+                    norm2 = ((A1 @ Y_new.t()).pow(2).sum() + (A2 @ Y_new).pow(2).sum()).sqrt().item()
                 else:
-                    norm1 = (Z1_new.t() @ W_q).pow(2).sum().sqrt().item()
-                    norm2 = (W_q @ Y_new.t()).pow(2).sum().sqrt().item()
+                    norm1 = (Z1_new.t() @ A1).pow(2).sum().sqrt().item()
+                    norm2 = (A1 @ Y_new.t()).pow(2).sum().sqrt().item()
                 if norm1 < 1e-6: norm1 = 1.0
                 if norm2 < 1e-6: norm2 = 1.0
                 r1_rel = max(1e-8, r1 - eps_abs * (Y.numel() ** 0.5)) / norm1
@@ -372,14 +447,14 @@ def pdhg_method_AB(
             gamma = theta * gamma 
             rho = rho / theta
             R = rho * torch.ones((Y.shape[0], Y.shape[1]), device=Y.device, dtype=Y.dtype)
-            Gamma_1 = gamma * torch.ones((W_k.shape[0], 1), device=W_k.device, dtype=W_k.dtype) 
+            Gamma_1 = gamma * torch.ones((A2.shape[0], 1), device=A2.device, dtype=A2.dtype) 
             if use_Z2:
-                Gamma_2 = gamma * torch.ones((W_q.shape[0], 1), device=W_q.device, dtype=W_q.dtype)  
+                Gamma_2 = gamma * torch.ones((A1.shape[0], 1), device=A1.device, dtype=A1.dtype)  
 
         if mu > 0 and h_conj is not None: 
-            dual_val = - h_conj(Y_new) - (1/(2 * mu)) * (W_q @ Y_new.t() + G_wk).pow(2).sum()
+            dual_val = - h_conj(Y_new) - (1/(2 * mu)) * (A1 @ Y_new.t() + G1).pow(2).sum()
             if use_Z2:
-                dual_val = dual_val - (1/(2 * mu)) * (W_k @ Y_new + G_wq).pow(2).sum()
+                dual_val = dual_val - (1/(2 * mu)) * (A2 @ Y_new + G2).pow(2).sum()
             residuals["dual_vals"].append(dual_val.item())
             if f_star is not None:
                 residuals["rel_gap"].append( np.abs(f_star - dual_val.item()) / (abs(f_star) + 1e-12) )
@@ -406,87 +481,11 @@ def pdhg_method_AB(
     return Z1, Z2, residuals, (Y_new.pow(2).sum()).sqrt().item()
 
 
-torch.no_grad()
-def Y_dual_feasible2(*, A1, A2, G1, G2, max_kron=1_000, verbose=True, 
-                    diag_scaling=True, maxit=1000, tol=1e-10, debug=False):
-    """
-    Check dual feasibility: exists Y s.t. A1 Y^T = -G1 and A2 Y = -G2
 
-    We solve (A1^T A1)Y + Y(A1^T A1) = -(A2^T G2 + G1^T A1) for Y
-    residual = sqrt( ||A1 Y^T + G1||_F^2 + ||A2 Y + G2||_F^2 ).
-    """ 
-    device = A1.device
-    dtype  = A1.dtype
-    n = A1.shape[1]
-    assert G1.shape == A1.shape and G2.shape == A2.shape and A1.shape == A2.shape
-          
-    C   = -(A2.T @ G2 + G1.T @ A1) 
-    normC  = C.pow(2).sum().sqrt().item()
-    if normC == 0.0: normC = 1.0
-    # Small/medium case: solve via Kronecker.
-    if n**2 <= max_kron:
-        A1tA1 = A1.T @ A1              
-        A2tA2 = A2.T @ A2 
-        Ip = torch.eye(n, device=device, dtype=dtype)
-        In = torch.eye(n, device=device, dtype=dtype)
-        K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
-        y = torch.linalg.solve(K, C.T.reshape(-1))
-        Y = y.reshape(n, n).T
-    else:
-        # Large case: solve via CG
-        def M(Y):         # normal operator  
-            return A2.T @ (A2 @ Y) + (Y @ A1.T) @ A1
-
-        if diag_scaling:
-            D1 = (A1 * A1).sum(dim=0).clamp_min(1e-12).unsqueeze(0)
-            D2 = (A2 * A2).sum(dim=0).clamp_min(1e-12).unsqueeze(1)
-            if debug: 
-                assert torch.allclose(D1 + D2, D2.reshape(-1, 1) @ torch.ones(1, n, device=device, dtype=dtype) \
-                              + torch.ones(n, 1, device=device, dtype=dtype) @ D1.reshape(1, -1))
-        else:
-            D1, D2 = torch.ones(1, n, device=device, dtype=dtype), torch.ones(n, 1, device=device, dtype=dtype) 
-
-        def diag_precond(R):      # elementwise divide by D1 + D2
-            return R / (D1 + D2) 
-        
-        # Initialization
-        Y  = torch.zeros((n, n), device=device, dtype=dtype)
-        R  = C - M(Y)              # residual
-        Z  = diag_precond(R)               # preconditioned residual
-        P  = Z.clone()
- 
-        rz_old = (R * Z).sum()
-
-        for k in range(1, maxit+1):
-            W = M(P)
-            denom = (P * W).sum()
-            # Guard against breakdown
-            if abs(denom) < 1e-12:
-                if verbose: print(f"PCG breakdown at iter {k}")
-                break
-
-            alpha = (rz_old / denom).item()
-            Y = Y + alpha * P
-            R = R - alpha * W
-
-            if R.pow(2).sum().sqrt().item() < tol * normC:
-                break
-
-            Z = diag_precond(R)
-            rz_new = (R * Z).sum()
-            beta = (rz_new / rz_old).item()
-            P = Z + beta * P
-            rz_old = rz_new 
-
-    res = torch.sqrt((A1 @ Y.T + G1).pow(2).sum() + (A2 @ Y + G2).pow(2).sum()).item() / normC
-    return Y, res
-
-
-
-def fista_ls_l1_reg(W_k: torch.Tensor | None,
-                    W_q: torch.Tensor,
-                    G_wk: torch.Tensor,
-                    G_wq: torch.Tensor | None, 
+def fista_ls_l1_reg(A2: torch.Tensor | None,
+                    A1: torch.Tensor,
+                    G1: torch.Tensor,
+                    G2: torch.Tensor | None, 
                     beta: float,
                     mu: float,
                     lamb_max=None,
@@ -501,13 +500,13 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
     """
     Fista for solving the dual problem:
     maximize -\frac{1}{2\mu}\|\mathcal{A}^*(Y) + G\|_F^2 - \beta \|vec(Y)\|_1
-    \mathcal{A}^*(Y) = [W_q Y^T; W_k Y] or W_q Y if W_k is None
+    \mathcal{A}^*(Y) = [A1 Y^T; A2 Y] or A1 Y if A2 is None
     """ 
-    use_Z2 = not ((W_k is None) or (G_wq is None) ) 
+    use_Z2 = not ((A2 is None) or (G2 is None) ) 
     if lamb_max is None:
-        nA = W_q.pow(2).sum().sqrt().item()
+        nA = A1.pow(2).sum().sqrt().item()
         if use_Z2:
-            nB = W_k.pow(2).sum().sqrt().item()
+            nB = A2.pow(2).sum().sqrt().item()
             lamb_max = (nA * nA + nB * nB) ** 0.5
         else:
             lamb_max = nA
@@ -517,8 +516,8 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
     if Y0 is not None:
         X1 = Y0
     else:
-        X1 = torch.zeros((W_k.shape[1], W_q.shape[1]), device=G_wk.device, dtype=G_wk.dtype)
-    X0 = torch.zeros((G_wk.shape[1], W_q.shape[1]), device=G_wk.device, dtype=G_wk.dtype)
+        X1 = torch.zeros((A2.shape[1], A1.shape[1]), device=G1.device, dtype=G1.dtype)
+    X0 = torch.zeros((G1.shape[1], A1.shape[1]), device=G1.device, dtype=G1.dtype)
     X1 = X0.clone()
     residuals = {"r1": [],  "r1_rel": [], "r2": [],  "r2_rel": [], "dual_vals":[], "rel_gap":[]}
     if pd_residuals is not None:
@@ -528,9 +527,9 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
         # Extrapolation step
         Y = X1 + ((t - 2) / (t + 1)) * (X1 - X0)
         # Gradient step
-        grad = (1/mu) * (W_q @ Y.T + G_wk).T @ W_q 
+        grad = (1/mu) * (A1 @ Y.T + G1).T @ A1 
         if use_Z2:
-            grad = grad + (1/mu) * (W_k.T @ (W_k @ Y + G_wq)) 
+            grad = grad + (1/mu) * (A2.T @ (A2 @ Y + G2)) 
         # Prox step
         Y1 = prox_l1(Y - step_size * grad, beta * step_size) 
         if pd_residuals is None:
@@ -541,17 +540,17 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
             r1_rel = max(1e-12, r1 - eps_abs * (Y.numel() ** 0.5)) / normalize 
         else:
             # primal recovery
-            Z1_fista = (1 / mu) * (- G_wk - W_q @ Y1.T)
-            Z2_fista = (1 / mu) * (- G_wq - W_k @ Y1)
+            Z1_fista = (1 / mu) * (- G1 - A1 @ Y1.T)
+            Z2_fista = (1 / mu) * (- G2 - A2 @ Y1)
 
             r1, r1_rel, r2, r2_rel = pd_residuals(
-                A=W_k,
-                B=W_q,
+                A=A2,
+                B=A1,
                 Y=Y1,
                 Z1=Z1_fista,
                 Z2=Z2_fista,
-                G1=G_wk,
-                G2=G_wq,
+                G1=G1,
+                G2=G2,
                 beta=beta,
                 mu=mu,
             ) 
@@ -562,12 +561,12 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
         
         if use_Z2:
             loss = (
-                -(1.0/(2*mu)) * (W_q @ X1.T + G_wk).pow(2).sum()
-                -(1.0/(2*mu)) * (W_k @ X1   + G_wq).pow(2).sum()
+                -(1.0/(2*mu)) * (A1 @ X1.T + G1).pow(2).sum()
+                -(1.0/(2*mu)) * (A2 @ X1   + G2).pow(2).sum()
                 - beta * torch.sum(torch.abs(X1))).item()
         else:
             loss = (
-                -(1.0/(2*mu)) * (W_q @ X1.T + G_wk).pow(2).sum()
+                -(1.0/(2*mu)) * (A1 @ X1.T + G1).pow(2).sum()
                 - beta * torch.sum(torch.abs(X1))).item()
         residuals['dual_vals'].append(loss)
         if f_star is not None:
@@ -580,8 +579,8 @@ def fista_ls_l1_reg(W_k: torch.Tensor | None,
             break 
     if pd_residuals is None:
         # primal recovery
-        Z1_fista = (1 / mu) * (- G_wk - W_q @ Y1.T)
-        Z2_fista = (1 / mu) * (- G_wq - W_k @ Y1)
+        Z1_fista = (1 / mu) * (- G1 - A1 @ Y1.T)
+        Z2_fista = (1 / mu) * (- G2 - A2 @ Y1)
     return X1, Z1_fista, Z2_fista, residuals
 
 
@@ -610,3 +609,13 @@ def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu, abs_tol=1e-4):
     if norm2 < 1e-6: norm2 = 1.0
     r2_rel = r2 / norm2 
     return r1, r1_rel, r2, r2_rel
+
+
+def pd_residuals_max_ball(A1, A2, Y, Z, G1, G2, beta, mu, abs_tol=1e-4):
+    m = A1.shape[0]
+    Z1, Z2 = Z[:m, :], Z[m:, :] 
+    return pd_residuals_infty_ball(B=A1, A=A2, Y=Y, Z1=Z1, Z2=Z2, G1=G1, G2=G2, 
+                                   beta=beta, mu=mu, abs_tol=abs_tol)
+
+
+

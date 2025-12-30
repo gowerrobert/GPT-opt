@@ -276,6 +276,22 @@ def Z_sylvester_solve(*, A1, A2, Y0, beta, Z1_0=None, Z2_0=None, verbose=True,
     return Z1, Z2, res
 
 
+def matcal_A_to_kron_Kron(A1, A2):
+    A1t = A1.T.contiguous()
+    A2t = A2.T.contiguous()
+    n = A1.shape[1]
+    In = torch.eye(n, device=A1.device, dtype=A1.dtype)
+    K = torch.cat([torch.kron(A1t, In), torch.kron(In, A2t)], dim=1)
+    return K
+
+def matcal_AAT_to_kron_Kron(A1, A2):
+    A1tA1 = A1.T @ A1              
+    A2tA2 = A2.T @ A2 
+    n = A1.shape[1]
+    Ip = torch.eye(n, device=A1.device, dtype=A1.dtype)
+    In = torch.eye(n, device=A1.device, dtype=A1.dtype)
+    K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
+    return K
 
 torch.no_grad()
 def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
@@ -296,12 +312,8 @@ def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
     lambda_reg = lambda_reg0 * normC
     if normC == 0.0: normC = 1.0
     # Small/medium case: solve via Kronecker.
-    if method == "kron":
-        A1tA1 = A1.T @ A1              
-        A2tA2 = A2.T @ A2 
-        Ip = torch.eye(n, device=device, dtype=dtype)
-        In = torch.eye(n, device=device, dtype=dtype)
-        K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
+    if method == "kron": 
+        K = matcal_AAT_to_kron_Kron(A1, A2)  # [(n^2) x (n^2)]
         y = torch.linalg.lstsq(K, C.T.reshape(-1)).solution #torch.linalg.solve(K, C.T.reshape(-1))
         Y = y.reshape(n, n).T
         last_iter = 1
@@ -387,7 +399,6 @@ def cvxpy_Y_sylvester_solve(*, A1, A2, G1, G2):
 
 
 
-
 def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm"):
     device, dtype = A.device, A.dtype
     p2, n = A.shape
@@ -408,13 +419,13 @@ def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm
 
         # |A| row/col sums 
         r_A = A.pow(2).sum(dim=1)                 # (p2,)
-        c_A = A.pow(2).sum(dim=0)                 # (n,)
+        c_A = A.pow(2).sum(dim=0)                 # (n,) 
  
     inv_rB = torch.where(r_B > 0, 1.0 / (r_B + eps), torch.zeros_like(r_B))
     inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))
     inv_c_sum = torch.where(
-        (c_B[None, :] + c_A[:, None]) > 0, 1.0 / (c_B[None, :] + c_A[:, None] + eps),
-        torch.zeros((n, n), device=device, dtype=dtype))
+            (c_B[None, :] + c_A[:, None]) > 0, 1.0 / (c_B[None, :] + c_A[:, None] + eps),
+            torch.zeros((n, n), device=device, dtype=dtype))
 
     # Diagonal entries as broadcastable tensors: 
     R       = eta * inv_c_sum                     # (n, n)   for Y
