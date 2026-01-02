@@ -167,7 +167,7 @@ def attn_least_squares_solve(*, A1, A2, G1, G2, X_type, beta=None, Y0=None, verb
 
     if X_type == "Z":
         tilde_Z0  = torch.zeros((2 * m, n), device=device, dtype=dtype) # [Z1.T, Z2]
-        S =  torch.sign(Y0)
+        S =  torch.sign(Y0) #* (Y0.abs() >= rho*beta)
         tilde_B = - R_05 * beta * S
         normB = beta * (S.pow(2).sum()).sqrt().item()
         if normB == 0.0: normB = 1.0

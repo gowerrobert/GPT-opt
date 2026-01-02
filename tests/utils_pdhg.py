@@ -6,6 +6,7 @@ import contextlib, json, time
 from glob import glob
 import pandas as pd
 
+from gptopt.optim.fast_pdhg import pdhg_kq_attn_layer
 from gptopt.optim.pdhg import prox_l1, pdhg_method_AB, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
 from gptopt.train import Logging, eval_validation_loss
 from gptopt.gpt_model import CausalSelfAttention
@@ -105,6 +106,72 @@ def cvxpy_AB(G1, G2, A, B, beta, mu=0, verbose=False):
     prob.solve(solver=cp.CLARABEL, verbose=verbose)
     assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
     return Z1.value, Z2.value, obj.value, constraints[0].dual_value
+
+
+
+def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg, 
+                    Z1_0=None, Z2_0=None, Y0=None,
+                    f_star=None, max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball,
+                    eps_abs=1e-8, eps_rel=1e-8, versbose=False, theta=1):
+
+    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2) \
+                            + (mu_reg / 2) * ((Z1).pow(2).sum() + Z2.pow(2).sum())).item()  
+    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
+
+    metrics = {} 
+
+    settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+            "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+            "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+            # "pdhg eq": {"diag_scaling": False, "equilibration": True, "reflected_halpern":False, "enable_restart": False},
+            "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
+            "ada rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
+            "ada rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
+           }
+    residuals = {}
+    m = A.shape[0]
+    if Z1_0 is None: 
+        Z0 = None
+    else:
+        Z0 = torch.cat([Z1_0, Z2_0], dim=0) 
+    if Z0 is not None and Y0 is not None:
+        metrics["init"] = {
+                    "obj": func_obj(Z0[:m, :], Z0[m:, :]),
+                    "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])}
+    for setting in settings:
+        # Torch prox for h* (uses prox_l1 from pdhg.py)
+        prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
+        h_conj = lambda y: beta * torch.abs(y).sum()
+
+        # Run torch PDHG
+        Z_t, res, _, Y_t = pdhg_kq_attn_layer(
+            prox_h_conj, A2=A, A1=B, G1=G1, G2=G2,
+            max_iter=max_iter, eps_abs=eps_abs, eps_rel=eps_rel,
+            stopping=stopping, Y0=Y0, Z0=Z0,
+            h_conj=h_conj, beta=beta, pd_residuals=pd_residuals,
+            f_star=f_star, mu=mu_reg,
+            diag_scaling=settings[setting]["diag_scaling"], 
+            equilibration=settings[setting]["equilibration"],
+            reflected_halpern=settings[setting]["reflected_halpern"],
+            enable_restart=settings[setting]["enable_restart"],
+            verbose=versbose, theta=theta
+        )
+        residuals[setting] = res  
+        metrics[setting] = {
+                    "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
+                    "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
+    }  
+ 
+    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
+    print(header)
+    print("-" * len(header))
+    for method in metrics.keys(): 
+        m = metrics[method]
+        print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
+
+    return residuals
+
+
 
 
 def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,  
@@ -473,12 +540,6 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     nB = torch.linalg.norm(B, ord="fro").item()
     lamb_max = (nA * nA + nB * nB) ** 0.5
 
-    if debug:
-        matrix_details(A)
-        matrix_details(B)
-        matrix_details(G1)
-        matrix_details(G2)
-    
     return A, B, G1, G2, A_np, B_np, G1_np, G2_np, lamb_max
 
 
