@@ -9,6 +9,8 @@ optimizer_params:
   pdhg_max_iter: 100
   momentum: false 
   diag_scaling: true 
-  acceleration: false
+  # acceleration: false
   warm_start: false
+  enable_restart: false
+  reflected_halpern: false
   pd_type: "pdhg" # "fista",  "pdhg"

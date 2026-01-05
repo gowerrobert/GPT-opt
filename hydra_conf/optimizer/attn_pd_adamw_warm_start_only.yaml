@@ -5,10 +5,13 @@ optimizer_params:
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  max_norm_tr: 0.01
+  max_norm_tr: 0.001
   pdhg_max_iter: 0
+  lsqr_max_iter: 1000
   momentum: false 
   diag_scaling: true 
-  acceleration: false
+  # acceleration: false
   warm_start: true
+  enable_restart: false
+  reflected_halpern: false
   pd_type: "pdhg" # "fista",  "pdhg"

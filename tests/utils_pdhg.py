@@ -28,6 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 from gptopt.optim.pdhg import *
 
 
+
 def cvxpy_ls_l1_reg(W_k, W_q, G_wk, G_wq, beta, mu):
     Y = cp.Variable((G_wk.shape[1], W_q.shape[1]))
     obj = (1 / (2*mu)) * cp.sum_squares(W_q @ Y.T + G_wk) \
@@ -121,12 +122,12 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
     metrics = {} 
 
     settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
-            "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
-            "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
-            # "pdhg eq": {"diag_scaling": False, "equilibration": True, "reflected_halpern":False, "enable_restart": False},
-            "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
-            "ada rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
-            "ada rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
+             "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
+             "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+           # "pdhg eq": {"diag_scaling": False, "equilibration": True, "reflected_halpern":False, "enable_restart": False},
+          "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
+         "ada rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
+      "ada rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
            }
     residuals = {}
     m = A.shape[0]
@@ -138,13 +139,13 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
         metrics["init"] = {
                     "obj": func_obj(Z0[:m, :], Z0[m:, :]),
                     "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])}
-    for setting in settings:
-        # Torch prox for h* (uses prox_l1 from pdhg.py)
-        prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
-        h_conj = lambda y: beta * torch.abs(y).sum()
+    # Torch prox for h* (uses prox_l1 from pdhg.py)
+    prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
+    h_conj = lambda y: beta * torch.abs(y).sum()
 
+    for setting in settings:
         # Run torch PDHG
-        Z_t, res, _, Y_t = pdhg_kq_attn_layer(
+        Z_t, res, _, _ = pdhg_kq_attn_layer(
             prox_h_conj, A2=A, A1=B, G1=G1, G2=G2,
             max_iter=max_iter, eps_abs=eps_abs, eps_rel=eps_rel,
             stopping=stopping, Y0=Y0, Z0=Z0,
@@ -161,6 +162,16 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
                     "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
                     "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
     }  
+    if A.numel() <= 75**2:
+        from lp_cupdlpx import cupdlpx_AB
+        Z1, Z2, f_star2, Y = cupdlpx_AB( G1, G2, A, B, beta, time_limit=180, iter_limit=100_000,
+            eps_feas=1e-7, eps_opt=1e-7, feasibility_polishing=True, eps_feas_polish=1e-8)
+        r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=B, A=A, Y=Y, Z1=Z1, Z2=Z2,  
+                                                        G1=G1, G2=G2, beta=beta, mu=0, abs_tol=1e-4)
+
+        residuals["cupdlpx"] = {"r1": [r1]*max_iter, "r1_rel": [r1_rel]*max_iter, "r2": [r2]*max_iter, "r2_rel": [r2_rel]*max_iter}  
+        metrics["cupdlpx"] = { "obj": func_obj(Z1, Z2), "viol": func_constr_viol(Z1, Z2)}
+        print(f"{f_star2=}, {f_star=}")
  
     header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
     print(header)
@@ -366,11 +377,11 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
                     if k == "r_sum":
                         a1, a2 = res.get("r1", []), res.get("r2", [])
                         L = min(len(a1), len(a2))
-                        v = [a1[i] + a2[i] for i in range(L)] if L else []
+                        v = [(a1[i]**2 + a2[i]**2)**0.5 for i in range(L)] if L else []
                     elif k == "r_rel_sum":
                         a1, a2 = res.get("r1_rel", []), res.get("r2_rel", [])
                         L = min(len(a1), len(a2))
-                        v = [a1[i] + a2[i] for i in range(L)] if L else []
+                        v = [(a1[i]**2 + a2[i]**2)**0.5 for i in range(L)] if L else []
                     else:
                         v = res.get(k, [])
                     if len(v):
@@ -411,7 +422,7 @@ def plot_residuals_cold_warm_grid_by_param(
         a = res.get("r1_rel", [])
         b = res.get("r2_rel", [])
         L = min(len(a), len(b))
-        return [a[i] + b[i] for i in range(L)] if L else []
+        return [(a[i]**2 + b[i]**2)**0.5 for i in range(L)] if L else []
 
     plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
     pvals = sorted(set(residuals_cold_start) | set(residuals_warm_start)) or [None]
@@ -428,7 +439,7 @@ def plot_residuals_cold_warm_grid_by_param(
         # Compute shared per-row y-limits from both panels.
         if rel_ylim is None:
             ys = [y for D in (Dc, Dw) for m in methods for y in rsum(D.get(m, {})) if y > 0]
-            row_ylim = (min(ys), max(ys)) if ys else None
+            row_ylim = (min(ys)*0.9, max(ys)*1.1) if ys else None
         else:
             row_ylim = rel_ylim
 
@@ -560,7 +571,8 @@ def make_output_path_hydra(config, output_dir):
     return os.path.join(output_dir, file_name + ".json")
 
 
-def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg_sum=False, plot_res=['abs', 'rel']):
+def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, 
+                          agg_sum=True, plot_res=['abs', 'rel'], dpi=120, include_norms=True):
     layers = sorted(residuals_by_layer.keys())
     want = {str(x).lower() for x in (plot_res or [])}
 
@@ -571,7 +583,10 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg
 
     nrows = max(1, len(layers))
     ncols = max(1, len(ordered))
-    fig, ax = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows), sharex=True)
+    if include_norms:
+        ncols += 2
+        ordered.extend(['z_norm', 'y_norm'])
+    fig, ax = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2 * nrows), sharex=True, dpi=dpi)
     ax = np.asarray(ax).reshape(nrows, ncols)
 
     def plot1(a, y, label=None):
@@ -585,7 +600,7 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg
 
     def add2(u, v):
         L = min(len(u), len(v))
-        return [u[i] + v[i] for i in range(L)] if L else []
+        return [(u[i]**2 + v[i]**2)**0.5 for i in range(L)] if L else []
 
     for r, layer in enumerate(layers):
         lr = residuals_by_layer[layer]
@@ -596,7 +611,7 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg
                 k1, k2 = ('r1', 'r2') if key == 'abs' else ('r1_rel', 'r2_rel')
                 d1, d2 = lr.get(k1, []), lr.get(k2, [])
                 if agg_sum:
-                    lbl = r'$r_1+r_2$' if key == 'abs' else r'$r_1^{rel}+r_2^{rel}$'
+                    lbl = r'$\sqrt{r_1^2+r_2^2}$' if key == 'abs' else r'$\sqrt{(r_1^{rel})^2+(r_2^{rel})^2}$'
                     any_ |= plot1(a, add2(d1, d2), lbl)
                 else:
                     lbl1, lbl2 = (r'$r_1$', r'$r_2$') if key == 'abs' else (r'$r_1^{rel}$', r'$r_2^{rel}$')
@@ -607,6 +622,16 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False, agg
                         a.set(yscale='log', title=f"Layer {layer}-{'Abs' if key == 'abs' else 'Rel'}", xlabel='iter')
                     a.grid(True, which='both', ls='--', alpha=0.4)
                     a.legend()
+            elif key == 'z_norm':
+                any_ |= plot1(a, lr.get('z_norm', []))
+                if any_:
+                    a.set(title=f"Layer {layer}-||Z||", xlabel='iter')
+                    a.grid(True, which='both', ls='--', alpha=0.4)
+            elif key == 'y_norm':
+                any_ |= plot1(a, lr.get('y_norm', []))
+                if any_:
+                    a.set(title=f"Layer {layer}-||Y||", xlabel='iter')
+                    a.grid(True, which='both', ls='--', alpha=0.4)
             else:  # dual
                 any_ |= plot1(a, lr.get('dual_vals', []))
                 if any_:
@@ -920,11 +945,13 @@ def main(config: DictConfig):
             diag_scaling=opt_config.get("diag_scaling", False),
             pdhg_max_iter=opt_config.get("pdhg_max_iter", 1000),
             momentum=opt_config.get("momentum", False),
-            acceleration=opt_config.get("acceleration", False),
+            # acceleration=opt_config.get("acceleration", False),
             pd_type=opt_config.get("pd_type", "pdhg"),
-            halpern_start=opt_config.get("halpern_start", 5),
-            reflected_pdhg=opt_config.get("reflected_pdhg", False),
+            # halpern_start=opt_config.get("halpern_start", 5),
+            reflected_halpern=opt_config.get("reflected_halpern", False),
             warm_start=opt_config.get("warm_start", False),
+            enable_restart=opt_config.get("enable_restart", False),
+            lsqr_max_iter=opt_config.get("lsqr_max_iter", 1000),
         )
         use_my_adamw = True
     else:

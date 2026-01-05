@@ -277,9 +277,9 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
-                  'diag_scaling': opt_config.get('diag_scaling', True),
-                  'acceleration': opt_config.get('acceleration', False),
+                  'diag_scaling': opt_config.get('diag_scaling', True), 
                   'warm_start': opt_config.get('warm_start', False),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 1000),
                   } 
     elif name == "attn_rehpdhg_adamw":
         opt_obj = AttnPDAdamW
@@ -290,11 +290,11 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
-                  'diag_scaling': opt_config.get('diag_scaling', True),
-                  'acceleration': opt_config.get('acceleration', False),
-                  'halpern_start': opt_config.get('halpern_start', 5),
-                  'reflected_pdhg': opt_config.get('reflected_pdhg', True),
-                  'warmstart': opt_config.get('warmstart', False),
+                  'diag_scaling': opt_config.get('diag_scaling', True), 
+                  'reflected_halpern': opt_config.get('reflected_halpern', True), 
+                  'warm_start': opt_config.get('warm_start', False),
+                  'enable_restart': opt_config.get('enable_restart', False),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 1000),
                   }
     elif name == "attn_fista_adamw":
         opt_obj = AttnPDAdamW
