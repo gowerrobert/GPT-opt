@@ -399,5 +399,9 @@ python run.py --config configs/shakespeare.yaml
 `
 
 `
-./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_adamw.json small_fista  16
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep.json small_fista  16
+`
+
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq.json sm_sweep_lr_baselines 16
 `

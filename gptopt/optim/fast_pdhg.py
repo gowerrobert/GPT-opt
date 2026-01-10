@@ -238,7 +238,7 @@ def pdhg_kq_attn_layer(
     ): 
     """
     PDHG method for solving 
-                minimize_Z      tr(G^TZ) + h(mathcal_A(Z)) + (mu/2) ||Z||_F^2
+                minimize_Z      tr(G^T Z) + h(\mathcal{A}(Z)) + (mu/2) ||Z||_F^2
     """
     if lamb_max is None:
         nA = A1.pow(2).sum().sqrt().item()
@@ -248,7 +248,7 @@ def pdhg_kq_attn_layer(
 
     Z, Z_bar, Y = pdhg_initialize_variables(A1=A1, Z0=Z0, Y0=Y0) 
     if mu > 0:
-        Z.copy_((1 / mu) * (- torch.cat([G1, G2], dim=0) - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y))) 
+        Z.copy_((1 / mu) * (- Grad - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y))) 
         Z_bar.copy_(Z)
     m, n = A1.shape
 
@@ -274,7 +274,6 @@ def pdhg_kq_attn_layer(
     if verbose:
         print(f"||A||_op <= {lamb_max:.4e}")
 
-    
     record.record(0, Y=Y, Z=Z)
     state = PDHGSolverState(Z=Z, Y=Y, A1=A1, A2=A2)
     if enable_restart:

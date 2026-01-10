@@ -33,11 +33,11 @@ def fista_ls_l1_reg(A2: torch.Tensor,
         # print(f"{lamb_max=}")
     
     step_size = mu / lamb_max**2
-    Y_old = torch.zeros((G1.shape[1], A1.shape[1]), device=G1.device, dtype=G1.dtype)
-    if Y0 is not None:
-        tilde_Y = Y0
+    if Y0 is not None: 
+        Y_old = Y0.clone()
     else:
-        tilde_Y = Y_old.clone()
+        Y_old = torch.zeros((G1.shape[1], A1.shape[1]), device=G1.device, dtype=G1.dtype)
+    tilde_Y = Y_old.clone()
     G12 = torch.cat([G1, G2], dim=0)
     record = ResidualRecorder(pd_residuals=pd_residuals,
                                     A1=A1, A2=A2, G1=G1, G2=G2,

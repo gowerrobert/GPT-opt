@@ -25,13 +25,10 @@ def attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t
     return False
 
 
-def prox_l1(x, beta, R=None):
+def prox_l1(x, beta, R=1):
     # soft-thresholding
     # proximal operator for l1 norm beta * ||x||_1
-    if R is not None:
-        threshold = beta * R
-    else:
-        threshold = beta
+    threshold = beta * R 
     return torch.sign(x) * torch.clamp(torch.abs(x) - threshold, min=0.0)
 
 
