@@ -2,7 +2,7 @@
 
 lr=${1:-0.0001}
 wd=${2:-0.0}
-model=${3:-gpt-small}
+model=${3:-gpt-small-default}
 
 python run_hydra.py \
     model=$model \

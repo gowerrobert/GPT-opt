@@ -1,7 +1,7 @@
 {
-    "lr": [0.001], 
+    "lr": [0.001, 0.003],
     "rho_over_lr": [0.1, 1, 10, 50, 100],
-    "attn_max_iter": [100, 20],
+    "attn_max_iter": [100, 50],
     "warm_start": [false],
     "momentum": [false],
     "mu_frac": [0.1, 0.05, 0.01]

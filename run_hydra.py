@@ -107,7 +107,8 @@ def main(config : DictConfig):
     
     
     p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name \
-                                          or "_pd_" in opt_name or "fista" in opt_name) else model_copy.parameters()
+                                          or "_pd_" in opt_name or "attn_" in opt_name
+                                          or "fista" in opt_name) else model_copy.parameters()
 
     optimizer = optimizer_obj(p, **hyperp)
 

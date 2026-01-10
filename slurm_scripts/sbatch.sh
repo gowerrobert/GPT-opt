@@ -11,7 +11,18 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "TASK_FILE: $TASK_FILE"
 
 # Ensure the directories exist
-mkdir -p slurm_logs disbatch_logs
+mkdir -p slurm_logs disbatch_logs 
+mkdir -p /mnt/ceph/users/tparshakova/wandb
+mkdir -p /mnt/ceph/users/tparshakova/.cache/wandb
+mkdir -p /mnt/ceph/users/tparshakova/.cache/matplotlib
+
+# Configure wandb and matplotlib to use ceph storage
+export WANDB_DIR="/mnt/ceph/users/tparshakova/wandb"
+export WANDB_CACHE_DIR="/mnt/ceph/users/tparshakova/.cache/wandb"
+export WANDB_DATA_DIR="/mnt/ceph/users/tparshakova/wandb"
+export MPLCONFIGDIR="/mnt/ceph/users/tparshakova/.cache/matplotlib"
+
+module load disBatch
 
 module load disBatch
 module load python

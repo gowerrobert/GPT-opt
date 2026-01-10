@@ -10,7 +10,8 @@ from .momo_adam import MomoAdam
 from .muon import Muon
 from .nesgd import NESGD
 from .sign_gd import SignGD
-from .pdhg import AttnPDAdamW
+from .attn_kq import AttnPDAdamW
+from .myadamw import MyAdamW 
 # from .sps import SPS
 # from .adabound import AdaBoundW
 # from .adabelief import AdaBelief
@@ -273,38 +274,50 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)), 
-                  'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
-                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
+                  'rho_over_lr': opt_config.get('rho_over_lr', 10),
+                  'attn_max_iter': opt_config.get('attn_max_iter', 100),
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
                   'diag_scaling': opt_config.get('diag_scaling', True), 
                   'warm_start': opt_config.get('warm_start', False),
-                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 1000),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
                   } 
     elif name == "attn_rehpdhg_adamw":
         opt_obj = AttnPDAdamW
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)), 
-                  'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
-                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
+                  'rho_over_lr': opt_config.get('rho_over_lr', 10),
+                  'attn_max_iter': opt_config.get('attn_max_iter', 100),
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
                   'diag_scaling': opt_config.get('diag_scaling', True), 
                   'reflected_halpern': opt_config.get('reflected_halpern', True), 
                   'warm_start': opt_config.get('warm_start', False),
                   'enable_restart': opt_config.get('enable_restart', False),
-                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 1000),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
                   }
     elif name == "attn_fista_adamw":
         opt_obj = AttnPDAdamW
         hyperp = {'lr': lr,
                   'weight_decay': opt_config.get('weight_decay', 0),
                   'betas': opt_config.get('betas', (0.9, 0.999)), 
-                  'max_norm_tr': opt_config.get('max_norm_tr', 0.01),
-                  'pdhg_max_iter': opt_config.get('pdhg_max_iter', 500),
+                  'rho_over_lr': opt_config.get('rho_over_lr', 10),
+                  'attn_max_iter': opt_config.get('attn_max_iter', 100),
                   'pd_type': opt_config.get('pd_type', 'fista'),
                   'momentum': opt_config.get('momentum', False),
+                  "mu_frac": opt_config.get("mu_frac", 0.1),
+                  "lsqr_max_iter": opt_config.get("lsqr_max_iter", 100)
+                  }
+    elif name == 'my_adamw':
+        opt_obj = MyAdamW
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)),
+                  'eps': opt_config.get('eps', 1e-8),
+                    #   'lr_schedule': opt_config.get('lr_schedule', 'constant-linear'),
+                    #   'fused': True,
+                    #   'warm_up_fraction': opt_config.get('warm_up_fraction', 0.4),
                   }
     else:
         raise KeyError(f"Unknown optimizer name {name}.")

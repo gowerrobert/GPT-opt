@@ -132,8 +132,8 @@ def attn_least_squares_solve(*, A1, A2, G1, G2, X_type, beta=None, Y0=None, verb
         M=A^* if X=Y
     diag_scaling: use R^{1/2}MG^{1/2} as an operator
     """  
-    device = A1.device
-    dtype  = A1.dtype
+    device = G1.device
+    dtype  = G1.dtype
     m, n = A1.shape
     if diag_scaling:
         R, Gamma_1, Gamma_2 = pdhg_diagonal_scaling(A=A2, B=A1, eta=0.99, agg_op="l2_norm_sq")
@@ -302,8 +302,8 @@ def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
     We solve (A1^T A1)Y + Y(A1^T A1) = -(A2^T G2 + G1^T A1) for Y
     residual = sqrt( ||A1 Y^T + G1||_F^2 + ||A2 Y + G2||_F^2 ).
     """ 
-    device = A1.device
-    dtype  = A1.dtype
+    device = G1.device
+    dtype  = G1.dtype
     m, n = A1.shape
     assert G1.shape == A1.shape and G2.shape == A2.shape and A1.shape == A2.shape
           

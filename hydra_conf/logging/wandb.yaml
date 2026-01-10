@@ -5,8 +5,10 @@ logging_params:
   save_ckpt_step: 500
   load_ckpt_step: 0
   keep_last: 2
+  max_curves_per_layer: 50
+  inner_iter_curves: 5
   ckpt_dir: ""
   results_dir: "outputs/hydra-results/my_experiment"
   wandb:
-    project: "gpt-opt"
+    project: "gpt-opt-kq-max"
     name: ${model.name}_${model.kq_max_type}_${data.dataset.name}_${optimizer.optimizer_params.name}_${paths.run_name}

@@ -378,3 +378,26 @@ python run.py --config configs/shakespeare.yaml
 ---
 
 **For questions or issues, check the code or contact the maintainers.**
+
+
+## Examples GPT-tiny
+`
+./slurm_scripts/submit.sh  scripts/run_shakespeare_rehpdhg_restart_adamw.sh param_configs/attn_rehpdhg_restart_adamw_sweep.json gpt_tiny_rehpdhg 16
+`
+
+`
+./slurm_scripts/submit.sh  scripts/run_shakespeare_fista_adamw.sh param_configs/attn_pd_adamw.json gpt_tiny_fista  16
+`
+
+`
+./slurm_scripts/submit.sh scripts/run_shakespeare_adam.sh param_configs/adamw.json gpt_tiny_adamw 5
+`
+
+## Examples GPT-small
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw.json small_adamw 2 
+`
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_adamw.json small_fista  16
+`

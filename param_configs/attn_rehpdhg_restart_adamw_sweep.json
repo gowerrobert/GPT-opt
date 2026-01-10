@@ -1,0 +1,10 @@
+{
+    "lr": [0.001], 
+    "diag_scaling": [true, false],
+    "enable_restart": [true, false],
+    "reflected_halpern": [true, false],
+    "warm_start": [true, false],
+    "rho_over_lr": [0.1, 1, 10, 50, 100],
+    "attn_max_iter": [100, 50], 
+    "mu_frac": [0.1, 0.05, 0.01]
+}

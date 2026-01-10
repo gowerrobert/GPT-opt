@@ -5,21 +5,13 @@ import numpy as np
 
 from typing import Optional, Callable, Literal, Any
 from .least_squares import pdhg_diagonal_scaling
-
+from .attn_utils import *
 
 """
 Adaptive restart and PID controller for PDHG primal weight
 is based on cuPDLPx implementation: https://github.com/MIT-Lu-Lab/cuPDLPx
 """
 
-
-def mathcal_A_linop(*, A1, A2, Z): # A operator
-    m = A1.shape[0]
-    return Z[:m, :].T @ A1 + A2.T @ Z[m:, :]
-       
-        
-def mathcal_A_adj_linop(*, A1, A2, Y):         # A^* operator  
-    return torch.cat([A1 @ Y.T, A2 @ Y], dim=0)
 
 
 
@@ -37,12 +29,7 @@ def pdhg_initialize_variables(A1, Z0=None, Y0=None):
     return Z, Z_bar, Y
 
 
-def pdhg_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t):
-    if t < min_iter:
-        return False 
-    if (r1 < eps_abs and r2 < eps_abs) or (r1_rel < eps_rel and r2_rel < eps_rel):
-        return True  
-    return False
+
 
 
 def check_adaptive_restart(
@@ -160,7 +147,7 @@ def perform_restart(state, restart_params):
     state.last_trial_fixed_point_error = np.inf
 
 
-class SolverState:
+class PDHGSolverState:
     """Extended solver state with all necessary fields."""
     def __init__(self, Z: torch.Tensor, Y: torch.Tensor, A1: torch.Tensor, A2: torch.Tensor):
         # Iteration counters
@@ -222,80 +209,7 @@ class RestartParams:
         self.i_smooth = 0.3  # Integral smoothing
 
 
-class PDHGResidualRecorder: 
-
-    def __init__(
-        self,
-        *,
-        pd_residuals: Optional[Callable[..., tuple[float, float, float, float]]] = None,
-        mu: float = 0.0,
-        f_star: float | None = None,
-        normalize: Literal["none", "by_first"] = "none",
-        warmup_iters: int = 5,
-        eps: float = 1e-8,
-        **pd_residuals_kwargs: Any,
-    ):
-        self.pd_residuals = pd_residuals
-        self.kw = dict(pd_residuals_kwargs)
-        self.mu = float(self.kw.get("mu", mu))
-        self.kw.setdefault("mu", self.mu)
-        self.f_star = f_star
-        self.normalize = normalize
-        self.warmup_iters = int(warmup_iters)
-        self.eps = float(eps)
-
-        self.r1: list[float] = []
-        self.r2: list[float] = []
-        self.r1_rel: list[float] = []
-        self.r2_rel: list[float] = []
-        self.dual_vals: list[float] = []
-        self.rel_gap: list[float] = []
-        self._norm1: float | None = None
-        self._norm2: float | None = None
-        self.z_norm: list[float] = []
-        self.y_norm: list[float] = []
-
-
-    def update(self, t: int, *, r1: float, r2: float, r1_rel=None, r2_rel=None, dual_val=None) -> None:
-        self.r1.append(r1); self.r2.append(r2)
-
-        if self.normalize == "by_first" and self._norm1 is None and t >= self.warmup_iters:
-            self._norm1 = max(r1, self.eps)
-            self._norm2 = max(r2, self.eps)
-        if (r1_rel is None or r2_rel is None) and self.normalize == "by_first" and self._norm1 is not None:
-            r1_rel, r2_rel = r1 / self._norm1, r2 / self._norm2
-        if r1_rel is not None and r2_rel is not None:
-            self.r1_rel.append(r1_rel); self.r2_rel.append(r2_rel)
-
-        if dual_val is not None: 
-            self.dual_vals.append(dual_val)
-            if self.f_star is not None:
-                self.rel_gap.append(np.abs(self.f_star - dual_val) / (abs(self.f_star) + 1e-12))
-
-    def record(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, dual_val=None):
-        r1, r1_rel, r2, r2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
-        self.z_norm.append(Z.pow(2).sum().pow(0.5).item())
-        self.y_norm.append(Y.pow(2).sum().pow(0.5).item())
-        self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, dual_val=dual_val)
-        return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
-
-    def as_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"r1": self.r1, "r2": self.r2, "r1_rel": self.r1_rel, "r2_rel": self.r2_rel,
-                             "z_norm": self.z_norm, "y_norm": self.y_norm}
-        if self.mu > 0:
-            d["dual_vals"] = self.dual_vals
-        if self.f_star is not None:
-            d["rel_gap"] = self.rel_gap
-        return d
-
-    def get(self, key: str, default=None):
-        return self.as_dict().get(key, default)
-
-    def __getitem__(self, key: str):
-        return self.as_dict()[key]
-
-
-
+@torch.no_grad()
 def pdhg_kq_attn_layer(
     prox_h_conj,
     A1: torch.Tensor,
@@ -330,12 +244,15 @@ def pdhg_kq_attn_layer(
         nA = A1.pow(2).sum().sqrt().item()
         nB = A2.pow(2).sum().sqrt().item()
         lamb_max = (nA * nA + nB * nB) ** 0.5  
+    Grad = torch.cat([G1, G2], dim=0)
 
     Z, Z_bar, Y = pdhg_initialize_variables(A1=A1, Z0=Z0, Y0=Y0) 
-    Grad = torch.cat([G1, G2], dim=0)
+    if mu > 0:
+        Z.copy_((1 / mu) * (- torch.cat([G1, G2], dim=0) - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y))) 
+        Z_bar.copy_(Z)
     m, n = A1.shape
 
-    record = PDHGResidualRecorder(pd_residuals=pd_residuals,
+    record = ResidualRecorder(pd_residuals=pd_residuals,
                                     A1=A1, A2=A2, G1=G1, G2=G2,
                                     beta=beta, mu=mu, f_star=f_star)
     base_step = max(min(0.998 / (lamb_max + 1e-12), 1e4), 1e-5)
@@ -358,14 +275,14 @@ def pdhg_kq_attn_layer(
         print(f"||A||_op <= {lamb_max:.4e}")
 
     
-    record.record(0, Y=Y, Z=Z, dual_val=dual_val)
-    state = SolverState(Z=Z, Y=Y, A1=A1, A2=A2)
+    record.record(0, Y=Y, Z=Z)
+    state = PDHGSolverState(Z=Z, Y=Y, A1=A1, A2=A2)
     if enable_restart:
         restart_params = RestartParams()
 
     best_res = np.inf
 
-    for t in range(max_iter):
+    for t in range(1, max_iter):
         if enable_restart: 
             gamma = base_step * state.primal_weight**0.5
             rho   = base_step / state.primal_weight**0.5
@@ -394,9 +311,8 @@ def pdhg_kq_attn_layer(
 
         # if primal is strongly convex -- record dual values
         if mu > 0 and h_conj is not None: 
-            dual_val = - h_conj(Y_new) - (1/(2 * mu)) * (A1 @ Y_new.t() + G1).pow(2).sum()
-            dual_val = dual_val - (1/(2 * mu)) * (A2 @ Y_new + G2).pow(2).sum() 
-
+            dual_val = (- h_conj(Y_new) - (1/(2 * mu)) * (mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y_new) + Grad).pow(2).sum()).item()
+  
         r1, r1_rel, r2, r2_rel = record.record(t, Y=Y_new, Z=Z_new, dual_val=dual_val)
 
         state.relative_dual_residual = r2_rel
@@ -421,93 +337,10 @@ def pdhg_kq_attn_layer(
             best_Z = Z.clone()
             best_Y = Y.clone()
 
-        if pdhg_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
+        if attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
             break 
 
     return best_Z, record.as_dict(), (best_Y.pow(2).sum()).sqrt().item(), best_Y
 
 
-def ruiz_equilibration(A1: torch.Tensor, A2: torch.Tensor, num_iters=10, eps=1e-8, debug=False):
-    """
-    Ruiz equilibration for linear operator 
-        \mathcal{A}(Z) = Z1^T A1 + A2^T Z2
-    returns R, Gamma1, Gamma2 such that the matrix \tilde K of the the equilibrated operator
-        \tilde \mathcal{A}(Z) = R * (Z1^T (Gamma2 A2) + (Gamma1 A1)^T Z2)
-    is s.t. -1 <= \tilde K_{ij} <= 1
-    where \vec{\tilde \mathcal{A}(Z)} = \tilde K [\vec{Z1}; \vec{Z2}]
-    """
-    device, dtype = A1.device, A1.dtype
-    p1, n = A1.shape
-    p2, n2 = A2.shape
-    assert n == n2
-
-    R = torch.ones((n, n), device=device, dtype=dtype)
-    Gamma1 = torch.ones((p1, n), device=device, dtype=dtype)
-    Gamma2 = torch.ones((p2, n), device=device, dtype=dtype)
-
-    absA1 = A1.abs()
-    absA2 = A2.abs()
-
-    def inv_sqrt_pos(x: torch.Tensor) -> torch.Tensor:
-        # 1/sqrt(x) for x>eps else 1 (do nothing if identically zero)
-        return torch.where(x > eps, torch.rsqrt(x), torch.ones_like(x))
-
-    for _ in range(num_iters): 
-        # ---- Row max for K rows (i,j) ----
-        # term1(i,j) = max_ℓ |Gamma1_{ℓ,i}| |A1_{ℓ,j}|
-        term1 = (Gamma1[:, :, None] * absA1[:, None, :]).amax(dim=0)          # (n,n)
-        # term2(i,j) = max_ℓ |A2_{ℓ,i}| |Gamma2_{ℓ,j}|
-        term2 = (absA2[:, :, None] * Gamma2[:, None, :]).amax(dim=0)          # (n,n)
-        row_max = R * torch.maximum(term1, term2)                         # (n,n)
-
-        # ---- Column max for Z1 columns (ℓ,i) ----
-        # m1(ℓ,i) = max_j |A1_{ℓ,j}| |R_{i,j}|
-        m1 = (absA1[:, None, :] * R[None, :, :]).amax(dim=2)              # (p1,n)
-        col1_max = Gamma1 * m1
-        
-
-        # ---- Column max for Z2 columns (ℓ,j) ----
-        # m2(ℓ,j) = max_i |A2_{ℓ,i}| |R_{i,j}|
-        m2 = (absA2[:, :, None] * R[None, :, :]).amax(dim=1)              # (p2,n)
-        col2_max = Gamma2 * m2
-
-        # ---- Update ----
-        Gamma1 = Gamma1 * inv_sqrt_pos(col1_max)
-        Gamma2 = Gamma2 * inv_sqrt_pos(col2_max)
-        R = R * inv_sqrt_pos(row_max)
-
-    return R, Gamma1, Gamma2
-
-
-def proj_subgrad_l1(AZ, Y, beta=1, abs_tol=1e-5, y_zero_tol_abs=1e-7, y_zero_tol_rel=1e-12):
-    # \min_S \beta\|AZ/\beta - S\|_F s.t. S \in \partial \|\vec(Y)\|_1 
-    S = torch.sign(Y)
-    y_tol = y_zero_tol_rel * Y.abs().max().item() + y_zero_tol_abs
-    S[Y.abs() <= y_tol] = torch.clamp((AZ[Y.abs() <= y_tol]/beta), -1.0, 1.0)
-    r = beta * (AZ / beta - S).pow(2).sum().sqrt().item()
-    norm = (beta + abs_tol) * (S.numel()**0.5)
-    return r, r / norm
-
-
-def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0, abs_tol=1e-4):
-    # KKT residuals 
-    # h = I_{||.||_\max \leq beta}
-    # 0 \in \partial h^*(Y) - \mathcal{A}(Z)   -- primal residual
-    # 0 = G + \mu Z + \mathcal{A}^*(Y).        -- dual residual
-    AZ = Z1.T @ B + A.T @ Z2 
-    r1, r1_rel = proj_subgrad_l1(AZ, Y, beta=beta)
-    r2_1 = (G1 + mu * Z1 + B @ Y.t()).pow(2).sum().sqrt().item()
-    r2_2 = (G2 + mu * Z2 + A @ Y).pow(2).sum().sqrt().item()
-    r2 = (r2_1**2 + r2_2**2)**0.5 
-    norm2 = (G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item() + abs_tol * (2 * G1.numel())**0.5
-    if norm2 < 1e-6: norm2 = 1.0
-    r2_rel = r2 / norm2 
-    return r1, r1_rel, r2, r2_rel
-
-
-def pd_residuals_max_ball(A1, A2, Y, Z, G1, G2, beta, mu=0, abs_tol=1e-4):
-    m = A1.shape[0]
-    Z1, Z2 = Z[:m, :], Z[m:, :] 
-    return pd_residuals_infty_ball(B=A1, A=A2, Y=Y, Z1=Z1, Z2=Z2, G1=G1, G2=G2, 
-                                   beta=beta, mu=mu, abs_tol=abs_tol)
 

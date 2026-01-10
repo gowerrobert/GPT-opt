@@ -5,11 +5,10 @@ optimizer_params:
   weight_decay: 0
   lr_schedule: constant-linear
   warm_up_fraction: 0.4
-  max_norm_tr: 0.0001
-  pdhg_max_iter: 100
+  rho_over_lr: 1
+  attn_max_iter: 1000
   momentum: false 
-  diag_scaling: false 
-  # acceleration: false
+  diag_scaling: false  
   enable_restart: false
   reflected_halpern: true
   warm_start: false

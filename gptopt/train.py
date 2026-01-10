@@ -5,6 +5,11 @@ import torch.distributed as dist
 from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
 import json
 from gptopt.gpt_model import CausalSelfAttention
+import numpy as np
+import wandb
+import matplotlib.pyplot as plt
+from collections import defaultdict, deque
+
 
 typedict = {"float16":torch.float16, "float32":torch.float32, "bfloat16":torch.bfloat16}
 
@@ -44,7 +49,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
     world_size, rank, local_rank, device  = get_worker_info()
     master_process = (rank == 0)
     logger = Logging()
-    optimizer_name = optimizer.__class__.__name__
+    optimizer_name = optimizer.__class__.__name__ 
     if 'momo' in optimizer_name.lower() or 'nesgd' in optimizer_name.lower():
         pass_loss = True
     else:
@@ -60,7 +65,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
     if master_process: print(f"Accumulate gradient for {grad_accum_steps} steps")
     total_iterations = int(training_params['num_epochs'] * len(train_dataloader) / training_params['tokens_processed'])
     max_grad_norm = training_params['gradnorm'] if training_params['gradnorm'] != 0. else float('inf')
-
+    log_inner_curves = total_iterations // logging_params.get('inner_iter_curves', 50)
     load_ckpt_step = logging_params['load_ckpt_step']
     if load_ckpt_step != 0:
         model, optimizer, train_dataloader, scheduler = load_checkpoint(ckpt_dir, load_ckpt_step, model, \
@@ -69,6 +74,11 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         print("Will not save checkpoints as no directory is specified")
 
     # Training loop
+    max_curves_per_layer = logging_params.get("max_curves_per_layer", 50)
+    curve_hist = {"r_rel":defaultdict(lambda: deque(maxlen=max_curves_per_layer)), 
+                  "z":defaultdict(lambda: deque(maxlen=max_curves_per_layer)), 
+                  "y":defaultdict(lambda: deque(maxlen=max_curves_per_layer))} 
+    
     for epoch in range(training_params['num_epochs']):
         if master_process:
             print(f"Epoch {epoch+1} of {training_params['num_epochs']}")
@@ -83,7 +93,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
         if step != 1 and master_process:
             print(train_dataloader.get_state())
             print(f"Resuming from micro_step={step}, opt_step={opt_step}")
-        
+        residuals_n_layers = {}
         for batch in train_dataloader:
             with autocast_ctxt:
                 output = model(input_ids=batch[0], labels=batch[1])
@@ -100,10 +110,16 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 if world_size > 1: dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-                if pass_loss:
-                    optimizer.step(closure=None, loss=loss_accum)
+                if "AttnPDAdamW" == optimizer_name:
+                    if pass_loss:
+                        loss, residuals_n_layers = optimizer.step(closure=None, loss=loss_accum)
+                    else:
+                        loss, residuals_n_layers = optimizer.step()
                 else:
-                    optimizer.step()
+                    if pass_loss:
+                        optimizer.step(closure=None, loss=loss_accum)
+                    else:
+                        optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
@@ -120,7 +136,23 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                         "train/step_time": step_time,
                         "train/step": opt_step,
                         "train/micro_step": step
-                    }
+                    } 
+                    
+                    if ((opt_step-1) % log_inner_curves == 0 or step == len(train_dataloader)-1) and residuals_n_layers:
+                        for layer_idx, res in residuals_n_layers.items():  
+                            x  = list(range(len(res["r_rel"])))
+
+                            for curve_type, c_hist in curve_hist.items():
+                                c_hist[int(layer_idx)].append((opt_step-1, x, res["r_rel"])) 
+                                # overlay ALL stored curves for this layer in one plot: (opt_step, x_list, y_list)
+                                hist = list(c_hist[int(layer_idx)])
+                                xs = [h[1] for h in hist]
+                                ys = [h[2] for h in hist]
+                                keys = [f"step_{h[0]}" for h in hist]
+                                wandb_log_dict[f"train/attn_kq_opt_overlay/layer_{int(layer_idx):02d}/{curve_type}"] = wandb.plot.line_series(
+                                    xs=xs, ys=ys, keys=keys, title=f"Attn {curve_type} (layer {int(layer_idx):02d})", xname="attn iteration")
+ 
+  
                     if getattr(model.config, "record_kq_max", False):
                         base_model = getattr(model, "module", model)
                         kq_max = None
@@ -136,7 +168,7 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                         wandb_log_dict["train/step_size_list"] = optimizer.step_size_list
                     for param_group_ix, param_group in enumerate(optimizer.param_groups):
                         wandb_log_dict[f"train/lr_{param_group_ix}"] = param_group['lr']
-                    wandb_run.log(wandb_log_dict)
+                    wandb_run.log(wandb_log_dict, step=opt_step)
                 logger.step_times.append(step_time)  # Are these different across ranks?
                 logger.grad_norms.append(norm.item())
                 for param_group in optimizer.param_groups:

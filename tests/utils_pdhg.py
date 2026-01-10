@@ -7,7 +7,8 @@ from glob import glob
 import pandas as pd
 
 from gptopt.optim.fast_pdhg import pdhg_kq_attn_layer
-from gptopt.optim.pdhg import prox_l1, pdhg_method_AB, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
+from gptopt.optim.attn_kq import prox_l1, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
+from gptopt.optim.myadamw import MyAdamW
 from gptopt.train import Logging, eval_validation_loss
 from gptopt.gpt_model import CausalSelfAttention
 from gptopt.utils import get_worker_info, save_checkpoint, load_checkpoint
@@ -25,7 +26,9 @@ import copy
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from gptopt.optim.pdhg import *
+from gptopt.optim.attn_kq import *
+from gptopt.optim.attn_utils import *
+from gptopt.optim.fast_pdhg import *
 
 
 
@@ -125,10 +128,11 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
              "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
              "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
            # "pdhg eq": {"diag_scaling": False, "equilibration": True, "reflected_halpern":False, "enable_restart": False},
-          "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
-         "ada rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
-      "ada rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True},
+          "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False}
            }
+    if mu_reg == 0:
+        settings["ada rehpdhg"] = {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}
+        settings["ada rehpdhg ds"] = {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True}
     residuals = {}
     m = A.shape[0]
     if Z1_0 is None: 
@@ -162,7 +166,7 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
                     "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
                     "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
     }  
-    if A.numel() <= 75**2:
+    if A.numel() <= 75**2 and mu_reg==0:
         from lp_cupdlpx import cupdlpx_AB
         Z1, Z2, f_star2, Y = cupdlpx_AB( G1, G2, A, B, beta, time_limit=180, iter_limit=100_000,
             eps_feas=1e-7, eps_opt=1e-7, feasibility_polishing=True, eps_feas_polish=1e-8)
@@ -172,6 +176,17 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
         residuals["cupdlpx"] = {"r1": [r1]*max_iter, "r1_rel": [r1_rel]*max_iter, "r2": [r2]*max_iter, "r2_rel": [r2_rel]*max_iter}  
         metrics["cupdlpx"] = { "obj": func_obj(Z1, Z2), "viol": func_constr_viol(Z1, Z2)}
         print(f"{f_star2=}, {f_star=}")
+
+    if mu_reg > 0:
+        _, Z_t, res = fista_ls_l1_reg(
+                A2=A, A1=B, G1=G1, G2=G2,
+                beta=beta, mu=mu_reg, max_iter=max_iter,
+                eps_abs=1e-6, eps_rel=1e-12, stopping=False,
+                Y0=Y0, pd_residuals=pd_residuals_max_ball
+            )
+        residuals["fista"] = res  
+        metrics["fista"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        
  
     header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
     print(header)
@@ -184,155 +199,13 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
 
 
 
-
-def compare_methods(prox_h_conj, h_conj, lamb_max, A, B, G1, G2, beta, mu_reg,  
-                    Z1_0=None, Z2_0=None, Y0=None,
-                    f_star=None, max_iter=1000, stopping=True, pd_residuals=pd_residuals_infty_ball,
-                    eps_abs=1e-8, eps_rel=1e-8):
-
-    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2) \
-                            + (mu_reg / 2) * ((Z1).pow(2).sum() + Z2.pow(2).sum())).item()  
-    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
-
-    metrics = {} 
-
-    Z1_t_diag_scaling, Z2_diag_scaling, residuals_diag_scaling, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals, norm_first_iter=False
-            )
-    metrics["PDHG DS"] = {
-        "obj": func_obj(Z1_t_diag_scaling, Z2_diag_scaling),
-        "viol": func_constr_viol(Z1_t_diag_scaling, Z2_diag_scaling),
-    }
-
-    del Z1_t_diag_scaling, Z2_diag_scaling
-
-    Z1_t_diag_scaling_h, Z2_diag_scaling_h, residuals_diag_scaling_h, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2, norm_first_iter=False
-            )
-    metrics["HPDHG DS"] = {
-        "obj": func_obj(Z1_t_diag_scaling_h, Z2_diag_scaling_h),
-        "viol": func_constr_viol(Z1_t_diag_scaling_h, Z2_diag_scaling_h),
-    }
-    del Z1_t_diag_scaling_h, Z2_diag_scaling_h
-
-    Z1_t_diag_scaling_reh, Z2_diag_scaling_reh, residuals_diag_scaling_reh, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2, reflected_pdhg=True, norm_first_iter=False
-            )
-    metrics["reHPDHG DS"] = {
-        "obj": func_obj(Z1_t_diag_scaling_reh, Z2_diag_scaling_reh),
-        "viol": func_constr_viol(Z1_t_diag_scaling_reh, Z2_diag_scaling_reh),
-    }
-    del Z1_t_diag_scaling_reh, Z2_diag_scaling_reh
-
-    Z1_t_reh, Z2_reh, residuals_reh, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=False, pd_residuals=pd_residuals,
-                halpern_start=2, reflected_pdhg=True, norm_first_iter=False
-            )
-    metrics["reHPDHG"] = {
-        "obj": func_obj(Z1_t_reh, Z2_reh),
-        "viol": func_constr_viol(Z1_t_reh, Z2_reh),
-    }
-    del Z1_t_reh, Z2_reh
-
-    Z1_h, Z2_h, residuals_h, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, diag_scaling=True, pd_residuals=pd_residuals,
-                halpern_start=2, norm_first_iter=False
-            )
-    metrics["HPDHG"] = {
-        "obj": func_obj(Z1_h, Z2_h),
-        "viol": func_constr_viol(Z1_h, Z2_h),
-    }
-    del Z1_h, Z2_h
-
-    Z1_t_vanilla, Z2_vanilla, residuals_vanilla, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-                h_conj=h_conj, f_star=f_star, pd_residuals=pd_residuals, norm_first_iter=False
-            )
-    metrics["PDHG"] = {
-        "obj": func_obj(Z1_t_vanilla, Z2_vanilla),
-        "viol": func_constr_viol(Z1_t_vanilla, Z2_vanilla),
-    }
-    del Z1_t_vanilla, Z2_vanilla
-
-    Z1_t_acceleration, Z2_acceleration, residuals_acceleration, _ = pdhg_method_AB(
-                prox_h_conj, W_k=A, W_q=B, G_wk=G1, G_wq=G2,
-                mu=mu_reg, beta=beta, max_iter=max_iter,
-                Z1_0=Z1_0, Z2_0=Z2_0, Y0=Y0,
-                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping, h_conj=h_conj,
-                f_star=f_star, acceleration=True, pd_residuals=pd_residuals, norm_first_iter=False
-            )
-
-    metrics["PDHG Acc"] = {
-        "obj": func_obj(Z1_t_acceleration, Z2_acceleration),
-        "viol": func_constr_viol(Z1_t_acceleration, Z2_acceleration),
-    }
-    del Z1_t_acceleration, Z2_acceleration
-    
-    residuals = {'PDHG': residuals_vanilla,
-                "PDHG DS": residuals_diag_scaling,
-                "PDHG Acc": residuals_acceleration,
-                "HPDHG DS": residuals_diag_scaling_h,
-                "reHPDHG DS": residuals_diag_scaling_reh,
-                "HPDHG": residuals_h,
-                "reHPDHG": residuals_reh,  # reHPDHG without diag scaling not implemented separately
-                }
-    
-    if mu_reg > 0:
-        Y_fista, Z1_fista, Z2_fista, residuals_fista = fista_ls_l1_reg(W_k=A, W_q=B, G_wk=G1,
-                                    G_wq=G2, beta=beta, mu=mu_reg, lamb_max=lamb_max, max_iter=max_iter, 
-                                    eps_abs=eps_abs, eps_rel=eps_rel, f_star=f_star, stopping=stopping,
-                                    pd_residuals=pd_residuals)
-
-        metrics["FISTA"] = {
-                "obj": func_obj(Z1_fista, Z2_fista),
-                "viol": func_constr_viol(Z1_fista, Z2_fista),
-            }
-        residuals["FISTA"] = residuals_fista 
- 
-    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
-    print(header)
-    print("-" * len(header))
-    for method in residuals.keys():
-        if method in metrics:
-            m = metrics[method]
-            print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
-
-    return residuals
-
-
-
-
 def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
                               abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
     return plot_residuals_grid_by_param(
         res_all, param_name="mu", dual_scale=dual_scale, dpi=dpi,
         abs_ylim=abs_ylim, rel_ylim=rel_ylim, gap_ylim=gap_ylim, dual_ylim=dual_ylim
     )
+
 
 
 def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi=120,
@@ -377,11 +250,11 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
                     if k == "r_sum":
                         a1, a2 = res.get("r1", []), res.get("r2", [])
                         L = min(len(a1), len(a2))
-                        v = [(a1[i]**2 + a2[i]**2)**0.5 for i in range(L)] if L else []
+                        v = [max(a1[i], a2[i]) for i in range(L)] if L else []
                     elif k == "r_rel_sum":
                         a1, a2 = res.get("r1_rel", []), res.get("r2_rel", [])
                         L = min(len(a1), len(a2))
-                        v = [(a1[i]**2 + a2[i]**2)**0.5 for i in range(L)] if L else []
+                        v = [max(a1[i], a2[i]) for i in range(L)] if L else []
                     else:
                         v = res.get(k, [])
                     if len(v):
@@ -405,6 +278,7 @@ def plot_residuals_grid_by_param(res_all, param_name="mu", dual_scale=False, dpi
     return fig, axs
 
 
+
 def plot_residuals_cold_warm_grid_by_param(
     residuals_cold_start,
     residuals_warm_start,
@@ -418,11 +292,11 @@ def plot_residuals_cold_warm_grid_by_param(
     Y-scale: log. If rel_ylim is None, y-limits are shared per row (cold+warm combined).
     """
 
-    def rsum(res):
+    def res_max(res):
         a = res.get("r1_rel", [])
         b = res.get("r2_rel", [])
         L = min(len(a), len(b))
-        return [(a[i]**2 + b[i]**2)**0.5 for i in range(L)] if L else []
+        return [max(a[i], b[i]) for i in range(L)] if L else []
 
     plabel = "μ" if param_name in {"mu", "μ"} else ("β" if param_name in {"beta", "β"} else str(param_name))
     pvals = sorted(set(residuals_cold_start) | set(residuals_warm_start)) or [None]
@@ -438,7 +312,7 @@ def plot_residuals_cold_warm_grid_by_param(
 
         # Compute shared per-row y-limits from both panels.
         if rel_ylim is None:
-            ys = [y for D in (Dc, Dw) for m in methods for y in rsum(D.get(m, {})) if y > 0]
+            ys = [y for D in (Dc, Dw) for m in methods for y in res_max(D.get(m, {})) if y > 0]
             row_ylim = (min(ys)*0.9, max(ys)*1.1) if ys else None
         else:
             row_ylim = rel_ylim
@@ -447,7 +321,7 @@ def plot_residuals_cold_warm_grid_by_param(
             ax = axs[r, c]
             any_ = False
             for m in methods:
-                v = rsum(D.get(m, {}))
+                v = res_max(D.get(m, {}))
                 if len(v):
                     ax.plot(v, color=colors[m]); any_ = True
             if not any_:
@@ -464,7 +338,6 @@ def plot_residuals_cold_warm_grid_by_param(
     fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
     plt.tight_layout(rect=[0, 0, 0.985, 1])
     return fig, axs
-
 
 
 
@@ -598,9 +471,9 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False,
         a.plot(y, **kw)
         return True
 
-    def add2(u, v):
+    def res_max(u, v):
         L = min(len(u), len(v))
-        return [(u[i]**2 + v[i]**2)**0.5 for i in range(L)] if L else []
+        return [max(u[i], v[i]) for i in range(L)] if L else []
 
     for r, layer in enumerate(layers):
         lr = residuals_by_layer[layer]
@@ -611,8 +484,8 @@ def plot_residuals_layers(residuals_by_layer, yscale=True, dual_scale=False,
                 k1, k2 = ('r1', 'r2') if key == 'abs' else ('r1_rel', 'r2_rel')
                 d1, d2 = lr.get(k1, []), lr.get(k2, [])
                 if agg_sum:
-                    lbl = r'$\sqrt{r_1^2+r_2^2}$' if key == 'abs' else r'$\sqrt{(r_1^{rel})^2+(r_2^{rel})^2}$'
-                    any_ |= plot1(a, add2(d1, d2), lbl)
+                    lbl = r'$\sqrt{r_1^2+r_2^2}$' if key == 'abs' else r'$\max{r_1^{rel}, r_2^{rel}}$'
+                    any_ |= plot1(a, res_max(d1, d2), lbl)
                 else:
                     lbl1, lbl2 = (r'$r_1$', r'$r_2$') if key == 'abs' else (r'$r_1^{rel}$', r'$r_2^{rel}$')
                     any_ |= plot1(a, d1, lbl1)
@@ -930,28 +803,38 @@ def main(config: DictConfig):
         lr = float(opt_config.get("lr", 1e-3))
         betas = tuple(opt_config.get("betas", (0.9, 0.999)))
         eps = float(opt_config.get("eps", 1e-8))
-        weight_decay = float(opt_config.get("weight_decay", 0.01))
-        qk_lr_scale = float(opt_config.get("qk_lr_scale", 1.0))
-        max_norm_tr = float(opt_config.get("max_norm_tr", 1.0))
+        weight_decay = float(opt_config.get("weight_decay", 0.01)) 
+        rho_over_lr = float(opt_config.get("rho_over_lr", 1.0))
 
         optimizer = AttnPDAdamW(
             model_copy.named_parameters(),
             lr=lr,
             betas=betas,
             eps=eps,
-            weight_decay=weight_decay,
-            qk_lr_scale=qk_lr_scale,
-            max_norm_tr=max_norm_tr,
+            weight_decay=weight_decay, 
+            rho_over_lr=rho_over_lr,
             diag_scaling=opt_config.get("diag_scaling", False),
-            pdhg_max_iter=opt_config.get("pdhg_max_iter", 1000),
-            momentum=opt_config.get("momentum", False),
-            # acceleration=opt_config.get("acceleration", False),
-            pd_type=opt_config.get("pd_type", "pdhg"),
-            # halpern_start=opt_config.get("halpern_start", 5),
+            attn_max_iter=opt_config.get("attn_max_iter", 1000),
+            momentum=opt_config.get("momentum", False), 
+            pd_type=opt_config.get("pd_type", "pdhg"), 
             reflected_halpern=opt_config.get("reflected_halpern", False),
             warm_start=opt_config.get("warm_start", False),
             enable_restart=opt_config.get("enable_restart", False),
             lsqr_max_iter=opt_config.get("lsqr_max_iter", 1000),
+        )
+        use_my_adamw = True
+    elif opt_name == "my_adamw":
+        lr = float(opt_config.get("lr", 1e-3))
+        betas = tuple(opt_config.get("betas", (0.9, 0.999)))
+        eps = float(opt_config.get("eps", 1e-8))
+        weight_decay = float(opt_config.get("weight_decay", 0.01)) 
+        rho_over_lr = float(opt_config.get("rho_over_lr", 1.0))
+        optimizer = MyAdamW(
+            model_copy.named_parameters(),
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay, 
         )
         use_my_adamw = True
     else:
@@ -1017,7 +900,7 @@ def load_sweep_jsons(base_dir) -> pd.DataFrame:
       - path: full path to the JSON file
       - lr: learning rate parsed from the directory name bs-4-lr-*-wd-*
       - wd: weight decay parsed from the directory name
-      - max_norm_tr: parsed from filename pattern ...-maxnorm-<value>-<hash>.json, if present
+      - rho_over_lr: parsed from filename pattern ...-maxnorm-<value>-<hash>.json, if present
       - final_train_loss: last value in logger.losses
       - min_val_loss: minimum of logger.val_losses (NaN if empty)
     """
@@ -1058,8 +941,8 @@ def load_sweep_jsons(base_dir) -> pd.DataFrame:
                 except ValueError:
                     pass
 
-        # Parse max_norm_tr from filename: ...-maxnorm-0.001-<hash>.json
-        max_norm_tr = None
+        # Parse rho_over_lr from filename: ...-maxnorm-0.001-<hash>.json
+        rho_over_lr = None
         fname_parts = os.path.basename(path).split("-")
         for i, p in enumerate(fname_parts):
             if p == "maxnorm" and i + 1 < len(fname_parts):
@@ -1067,7 +950,7 @@ def load_sweep_jsons(base_dir) -> pd.DataFrame:
                 # Strip extension if it somehow ended up attached
                 val_str = val_str.replace(".json", "")
                 try:
-                    max_norm_tr = float(val_str)
+                    rho_over_lr = float(val_str)
                 except ValueError:
                     pass
 
@@ -1075,7 +958,7 @@ def load_sweep_jsons(base_dir) -> pd.DataFrame:
             "path": path,
             "lr": lr,
             "wd": wd,
-            "max_norm_tr": max_norm_tr,
+            "rho_over_lr": rho_over_lr,
             "final_train_loss": final_train_loss,
             "min_val_loss": min_val_loss,
         })
@@ -1085,25 +968,25 @@ def load_sweep_jsons(base_dir) -> pd.DataFrame:
 
 
 def plot_sweep(df_in: pd.DataFrame) -> None:
-    """Plot sweep metrics vs lr for different max_norm_tr values, and a 2D heatmap.
+    """Plot sweep metrics vs lr for different rho_over_lr values, and a 2D heatmap.
 
     Expects df_in to have columns:
       - lr
-      - max_norm_tr
+      - rho_over_lr
       - final_train_loss
       - min_val_loss
     """
-    df_plot = df_in.dropna(subset=["lr", "max_norm_tr"]).copy()
+    df_plot = df_in.dropna(subset=["lr", "rho_over_lr"]).copy()
     if df_plot.empty:
-        print("No rows with both lr and max_norm_tr.")
+        print("No rows with both lr and rho_over_lr.")
         return
 
     print("Number of runs used for plots:", len(df_plot))
 
-    # 1) Line plots: metric vs lr, colored by max_norm_tr
+    # 1) Line plots: metric vs lr, colored by rho_over_lr
     fig, ax = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
 
-    for maxn, sub in df_plot.groupby("max_norm_tr"):
+    for maxn, sub in df_plot.groupby("rho_over_lr"):
         label = f"maxnorm={maxn:g}"
         sub_sorted = sub.sort_values("lr")
         ax[0].plot(sub_sorted["lr"], sub_sorted["final_train_loss"], marker="o", label=label)
@@ -1122,17 +1005,17 @@ def plot_sweep(df_in: pd.DataFrame) -> None:
     ax[1].legend()
     plt.tight_layout()
 
-    # 2) 2D heatmap: min_val_loss over (lr, max_norm_tr)
-    if df_plot["lr"].nunique() > 1 and df_plot["max_norm_tr"].nunique() > 1:
-        pivot = df_plot.pivot_table(index="max_norm_tr", columns="lr", values="min_val_loss")
+    # 2) 2D heatmap: min_val_loss over (lr, rho_over_lr)
+    if df_plot["lr"].nunique() > 1 and df_plot["rho_over_lr"].nunique() > 1:
+        pivot = df_plot.pivot_table(index="rho_over_lr", columns="lr", values="min_val_loss")
         plt.figure(figsize=(6, 5))
         im = plt.imshow(pivot.values, aspect="auto", origin="lower")
         plt.colorbar(im, label="min val loss")
         plt.xticks(range(len(pivot.columns)), [f"{x:.2e}" for x in pivot.columns], rotation=45)
         plt.yticks(range(len(pivot.index)), [f"{y:.2e}" for y in pivot.index])
         plt.xlabel("lr")
-        plt.ylabel("max_norm_tr")
-        plt.title("Sweep: min val loss over (lr, max_norm_tr)")
+        plt.ylabel("rho_over_lr")
+        plt.title("Sweep: min val loss over (lr, rho_over_lr)")
         plt.tight_layout()
     else:
-        print("Not enough variation in lr/max_norm_tr for a heatmap.")
+        print("Not enough variation in lr/rho_over_lr for a heatmap.")
