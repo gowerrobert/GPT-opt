@@ -151,14 +151,14 @@ class AttnPDAdamW(Optimizer):
         return loss, residuals_n_layers
 
 
-    def _update_kq_weights(self, p, g, group: dict[str, Any], debug: bool = True):
+    def _update_kq_weights(self, p, g, group: dict[str, Any]):
         # interpret rows as [Q; K; V]
         pd_type = group["pd_type"] 
         lsqr_max_iter = group["lsqr_max_iter"] 
         attn_max_iter = group["attn_max_iter"]
 
         n_embed = p.shape[1] 
-        assert p.shape[0] == 3 * n_embed, print(f"{p.shape}")
+        assert p.shape[0] == 3 * n_embed
         # A1=W_q, A2=W_k, G1=G_k, G2=G_q
         A1, G2   = p[:n_embed, :],                  g[:n_embed, :]
         A2, G1   = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :] 

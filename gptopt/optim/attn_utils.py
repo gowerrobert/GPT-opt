@@ -183,7 +183,7 @@ def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0):
     r2_1 = (G1 + mu * Z1 + B @ Y.t()).pow(2).sum().sqrt().item()
     r2_2 = (G2 + mu * Z2 + A @ Y).pow(2).sum().sqrt().item()
     r2 = (r2_1**2 + r2_2**2)**0.5 
-    norm2 = ((G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item())**0.5
+    norm2 = (G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item()
     if norm2 < 1e-6: norm2 = 1.0
     r2_rel = r2 / norm2 
     return r1, r1_rel, r2, r2_rel

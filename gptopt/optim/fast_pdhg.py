@@ -233,7 +233,7 @@ def pdhg_kq_attn_layer(
     verbose: bool = False,
     equilibration: bool = False,
     reflected_halpern: bool = False,
-    enable_restart: bool = False, \
+    enable_restart: bool = False, 
     theta=1.0 
     ): 
     """
