@@ -165,6 +165,7 @@ def ruiz_equilibration(A1: torch.Tensor, A2: torch.Tensor, num_iters=10, eps=1e-
 def proj_subgrad_l1(AZ, Y, beta=1, y_zero_tol_abs=1e-7, y_zero_tol_rel=1e-12):
     # \min_S \beta\|AZ/\beta - S\|_F s.t. S \in \partial \|\vec(Y)\|_1 
     S = torch.sign(Y)
+    # tolerance for zero components in Y
     y_tol = y_zero_tol_rel * Y.abs().max().item() + y_zero_tol_abs
     S[Y.abs() <= y_tol] = torch.clamp((AZ[Y.abs() <= y_tol]/beta), -1.0, 1.0)
     r = beta * (AZ / beta - S).pow(2).sum().sqrt().item()

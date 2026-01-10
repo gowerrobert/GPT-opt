@@ -166,16 +166,16 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
                     "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
                     "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
     }  
-    if A.numel() <= 75**2 and mu_reg==0:
-        from lp_cupdlpx import cupdlpx_AB
-        Z1, Z2, f_star2, Y = cupdlpx_AB( G1, G2, A, B, beta, time_limit=180, iter_limit=100_000,
-            eps_feas=1e-7, eps_opt=1e-7, feasibility_polishing=True, eps_feas_polish=1e-8)
-        r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=B, A=A, Y=Y, Z1=Z1, Z2=Z2,  
-                                                        G1=G1, G2=G2, beta=beta, mu=0, abs_tol=1e-4)
+    # if A.numel() <= 75**2 and mu_reg==0:
+    #     from lp_cupdlpx import cupdlpx_AB
+    #     Z1, Z2, f_star2, Y = cupdlpx_AB( G1, G2, A, B, beta, time_limit=180, iter_limit=100_000,
+    #         eps_feas=1e-7, eps_opt=1e-7, feasibility_polishing=True, eps_feas_polish=1e-8)
+    #     r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=B, A=A, Y=Y, Z1=Z1, Z2=Z2,  
+    #                                                     G1=G1, G2=G2, beta=beta, mu=0, abs_tol=1e-4)
 
-        residuals["cupdlpx"] = {"r1": [r1]*max_iter, "r1_rel": [r1_rel]*max_iter, "r2": [r2]*max_iter, "r2_rel": [r2_rel]*max_iter}  
-        metrics["cupdlpx"] = { "obj": func_obj(Z1, Z2), "viol": func_constr_viol(Z1, Z2)}
-        print(f"{f_star2=}, {f_star=}")
+    #     residuals["cupdlpx"] = {"r1": [r1]*max_iter, "r1_rel": [r1_rel]*max_iter, "r2": [r2]*max_iter, "r2_rel": [r2_rel]*max_iter}  
+    #     metrics["cupdlpx"] = { "obj": func_obj(Z1, Z2), "viol": func_constr_viol(Z1, Z2)}
+    #     print(f"{f_star2=}, {f_star=}")
 
     if mu_reg > 0:
         _, Z_t, res = fista_ls_l1_reg(
