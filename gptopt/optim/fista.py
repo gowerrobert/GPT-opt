@@ -64,8 +64,6 @@ def fista_ls_l1_reg(A2: torch.Tensor,
 
         if attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
             break 
-    if pd_residuals is None:
-        # primal recovery
-        Z_fista = (1 / mu) * (- G12 - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y_new)) 
+    
     return Y_new, Z_fista, record.as_dict()
 

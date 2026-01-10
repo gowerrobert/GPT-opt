@@ -172,7 +172,7 @@ def proj_subgrad_l1(AZ, Y, beta=1, y_zero_tol_abs=1e-7, y_zero_tol_rel=1e-12):
     return r, r / norm
 
 
-def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0, abs_tol=1e-4):
+def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0):
     # KKT residuals 
     # h = I_{||.||_\max \leq beta}
     # 0 \in \partial h^*(Y) - \mathcal{A}(Z)   -- primal residual
@@ -188,9 +188,9 @@ def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0, abs_tol=1e-4):
     return r1, r1_rel, r2, r2_rel
 
 
-def pd_residuals_max_ball(A1, A2, Y, Z, G1, G2, beta, mu=0, abs_tol=1e-4):
+def pd_residuals_max_ball(A1, A2, Y, Z, G1, G2, beta, mu=0):
     m = A1.shape[0]
     Z1, Z2 = Z[:m, :], Z[m:, :] 
     r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=A1, A=A2, Y=Y, Z1=Z1, Z2=Z2, G1=G1, G2=G2, 
-                                   beta=beta, mu=mu, abs_tol=abs_tol)
+                                   beta=beta, mu=mu)
     return r1, r1_rel, r2, r2_rel

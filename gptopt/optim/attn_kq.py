@@ -173,8 +173,8 @@ class AttnPDAdamW(Optimizer):
         # Update key-query weights via PDHG or FISTA
         prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
         h_conj = lambda y: beta * torch.abs(y).sum()
-        assert A1.shape == G2.shape and A2.shape == G1.shape, \
-            print(f"{A1.shape=}, {G2.shape=}, {A2.shape=}, {G1.shape=}") 
+        assert A1.shape == G2.shape and A2.shape == G1.shape
+
         if group["warm_start"]:
             Y0, _ = Y_dual_feasible(A1=A1, A2=A2, G1=G1, G2=G2, method="lsqr", maxit=lsqr_max_iter) 
             (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
@@ -183,34 +183,37 @@ class AttnPDAdamW(Optimizer):
         else:
             Y0, Z1_0, Z2_0 = None, None, None
 
-        if pd_type == "pdhg": 
+        if attn_max_iter == 0: # use values directly from LSQR
+            Z1_t, Z2_t = Z1_0, Z2_0
+            residuals = res
+            r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
+                A=A2, B=A1, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G1, G2=G2,
+                beta=beta, mu=mu_reg)
+            residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel], 
+                            'z_norm': [ (Z1_t.pow(2).sum() + Z2_t.pow(2).sum()).sqrt().item() ], 
+                            'y_norm': [ Y0.pow(2).sum().sqrt().item() ] }
+            norm_Y = Y0.pow(2).sum().sqrt().item()
+
+        elif pd_type == "pdhg": 
             # Z1_0=-G1; Z2_0=-G2 
-            # Run PDHG 
-            if attn_max_iter >= 1: 
-                if Z1_0 is not None: Z0 = torch.cat([Z1_0, Z2_0], dim=0)
-                else: Z0 = None 
-                Z_t, residuals, norm_Y, _ = pdhg_kq_attn_layer(prox_h_conj,
-                                            A2=A2, A1=A1, G1=G1, G2=G2,
-                                            max_iter=attn_max_iter, lamb_max=lamb_max, beta=beta,
-                                            mu=mu_reg, eps_abs=1e-6, eps_rel=1e-12, stopping=False, 
-                                            Z0=Z0, Y0=Y0, diag_scaling=group["diag_scaling"], 
-                                            h_conj=h_conj, pd_residuals=pd_residuals_max_ball,
-                                            reflected_halpern=group["reflected_halpern"], enable_restart=group["enable_restart"])
-                Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
-            else: # use values from LSQR
-                Z1_t, Z2_t = Z1_0, Z2_0
-                residuals = res
-                r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
-                    A=A2, B=A1, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G1, G2=G2,
-                    beta=beta, mu=mu_reg)
-                residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel], 
-                                'z_norm': [ (Z1_t.pow(2).sum() + Z2_t.pow(2).sum()).sqrt().item() ], 
-                                'y_norm': [ Y0.pow(2).sum().sqrt().item() ] }
-                norm_Y = Y0.pow(2).sum().sqrt().item()
+            # Run PDHG  
+            if Z1_0 is not None: Z0 = torch.cat([Z1_0, Z2_0], dim=0)
+            else: Z0 = None 
+            Z_t, residuals, norm_Y, _ = pdhg_kq_attn_layer(prox_h_conj,
+                                        A2=A2, A1=A1, G1=G1, G2=G2,
+                                        max_iter=attn_max_iter, lamb_max=lamb_max, beta=beta,
+                                        mu=mu_reg, eps_abs=1e-6, eps_rel=1e-12, stopping=False, 
+                                        Z0=Z0, Y0=Y0, diag_scaling=group["diag_scaling"], 
+                                        h_conj=h_conj, pd_residuals=pd_residuals_max_ball,
+                                        reflected_halpern=group["reflected_halpern"], 
+                                        enable_restart=group["enable_restart"])
+            Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
+            
         elif pd_type == "fista":
             # Run FISTA
             # mu < mu_max = \|A(G)\|_\max / \beta
-            mu_reg = max(group["mu_frac"] * mathcal_A_linop_base(A1=A1, A2=A2, Z1=G1, Z2=G2).abs().max().item() / beta, 1e-6)
+            mu_max = mathcal_A_linop_base(A1=A1, A2=A2, Z1=G1, Z2=G2).abs().max().item() / beta
+            mu_reg = max(group["mu_frac"] * mu_max, 1e-6)
             Y_fista, Z_t, residuals = fista_ls_l1_reg(
                 A2=A2, A1=A1, G1=G1, G2=G2,
                 beta=beta, mu=mu_reg, 
