@@ -203,7 +203,7 @@ def attn_least_squares_solve(*, A1, A2, G1, G2, X_type, beta=None, Y0=None, verb
 
 
 
-torch.no_grad()
+@torch.no_grad()
 def Z_sylvester_solve(*, A1, A2, Y0, beta, Z1_0=None, Z2_0=None, verbose=True, 
                     diag_scaling=True, maxit=1000, tol=1e-10, debug=False, lambda_reg0=0.0, 
                     method="lsqr"):
@@ -293,7 +293,7 @@ def matcal_AAT_to_kron_Kron(A1, A2):
     K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
     return K
 
-torch.no_grad()
+@torch.no_grad()
 def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
                     diag_scaling=True, maxit=1000, tol=1e-10, debug=False, lambda_reg0=0.0):
     """

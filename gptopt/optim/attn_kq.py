@@ -103,6 +103,7 @@ class AttnPDAdamW(Optimizer):
                 bias_correction2 = 1 - beta2**step
                 scale = bias_correction1 / bias_correction2**0.5
 
+                # TODO: momentum for FISTA 
                 if momentum: # whether to apply kq-max update on the momentum or raw gradient
                     buf1 = state["moment1"]
                     buf2 = state["moment2"]
