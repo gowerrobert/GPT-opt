@@ -169,6 +169,7 @@ def proj_subgrad_l1(AZ, Y, beta=1, y_zero_tol_abs=1e-7, y_zero_tol_rel=1e-12):
     y_tol = y_zero_tol_rel * Y.abs().max().item() + y_zero_tol_abs
     S[Y.abs() <= y_tol] = torch.clamp((AZ[Y.abs() <= y_tol]/beta), -1.0, 1.0)
     r = beta * (AZ / beta - S).pow(2).sum().sqrt().item()
+    # normalize by natural value of \|\beta S \|_F
     norm = beta * (S.numel()**0.5)
     return r, r / norm
 
@@ -183,6 +184,7 @@ def pd_residuals_infty_ball(A, B, Y, Z1, Z2, G1, G2, beta, mu=0):
     r2_1 = (G1 + mu * Z1 + B @ Y.t()).pow(2).sum().sqrt().item()
     r2_2 = (G2 + mu * Z2 + A @ Y).pow(2).sum().sqrt().item()
     r2 = (r2_1**2 + r2_2**2)**0.5 
+    # normalize r2 by the ||G1, G2||_F
     norm2 = (G1.pow(2).sum() + G2.pow(2).sum()).sqrt().item()
     if norm2 < 1e-6: norm2 = 1.0
     r2_rel = r2 / norm2 

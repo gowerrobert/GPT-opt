@@ -428,3 +428,8 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq_wclip.json sm_sweep_lr_baselines 7
 `
+
+### Wandb sync
+`
+wandb sync /mnt/ceph/users/tparshakova/wandb_offline/wandb/offline-run-*
+`

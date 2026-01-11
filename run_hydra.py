@@ -123,12 +123,16 @@ def main(config : DictConfig):
         wandb_config = dict(one_optimizer_params=opt_config, **config_no_optimizer, world_size=world_size)
 
         wandb_args = dict(logging_config['wandb'])
-        # wandb_args.setdefault('dir', f"{logging_config['results_dir']}/../wandb")
-        wandb_root = os.environ.get("WANDB_DIR", "/mnt/ceph/users/tparshakova/wandb_offline")
-        wandb_args.setdefault("dir", wandb_root)
-
         job_id = os.environ.get("SLURM_JOB_ID", "nojob")
         proc_id = os.environ.get("SLURM_PROCID", "0")
+        run_name = os.environ.get("SLURM_JOB_NAME") 
+         
+        base_wandb_dir = os.environ.get("WANDB_DIR", "/mnt/ceph/users/tparshakova/wandb_offline")
+        wandb_root = os.path.join(base_wandb_dir, str(run_name), str(job_id))
+        os.makedirs(wandb_root, exist_ok=True)
+
+        wandb_args.setdefault("dir", wandb_root) 
+
         existing_tags = list(wandb_args.pop("tags", []) or [])
         tags = existing_tags + [f"j{job_id}-p{proc_id}"]
 
