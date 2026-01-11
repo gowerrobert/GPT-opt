@@ -69,6 +69,7 @@ class CausalSelfAttention(nn.Module):
         self.kq_layernorm = config.kq_layernorm
         self.kq_logit_softcap = config.kq_logit_softcap
         self.kq_weight_clip = config.kq_weight_clip
+        self._kq_max_h_wver = None # weight version when kq_max_h was computed
         if self.kq_layernorm:
             self.ln_k = nn.LayerNorm(self.n_embd // self.n_head, bias=False)
             self.ln_q = nn.LayerNorm(self.n_embd // self.n_head, bias=False)
@@ -83,15 +84,21 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        if self.kq_weight_clip is not None and self.kq_max_h is not None:
-            # clip weights with gamma = min(1, c / self.kq_max_h) 
-            gamma = torch.minimum(torch.ones_like(self.kq_max_h), self.kq_weight_clip / self.kq_max_h)
-            W = self.c_attn.weight           # [3nemb, nemb]
-            a = gamma.sqrt().to(dtype=W.dtype, device=W.device).view(self.n_head, 1, 1)      # [nh]
-            with torch.no_grad(): 
-                # Q cols: [:n_embd], K cols: [n_embd:2*n_embd]; reshape to [nh, hs, nemb]
-                W[:self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
-                W[self.n_embd:2*self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
+        if self.training and self.kq_weight_clip is not None and self.kq_max_h is not None:
+            cur_ver = self.c_attn.weight._version
+            # clip weights with gamma = min(1, c / self.kq_max_h)
+            # only if weights changed since we recorded kq_max_h (i.e., after optimizer.step()) for microbatching
+            if self._kq_max_h_wver is not None and cur_ver != self._kq_max_h_wver:
+                gamma = torch.minimum(torch.ones_like(self.kq_max_h), self.kq_weight_clip / self.kq_max_h)
+                W = self.c_attn.weight           # [3nemb, nemb]
+                a = gamma.sqrt().to(dtype=W.dtype, device=W.device).view(self.n_head, 1, 1)      # [nh]
+                with torch.no_grad(): 
+                    # Q cols: [:n_embd], K cols: [n_embd:2*n_embd]; reshape to [nh, hs, nemb]
+                    W[:self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
+                    W[self.n_embd:2*self.n_embd, :].view(self.n_head, C // self.n_head, -1).mul_(a)
+                # consume the stored max to not clip again until next optimizer update
+                self.kq_max_h = None
+                self._kq_max_h_wver = None
 
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
@@ -121,7 +128,16 @@ class CausalSelfAttention(nn.Module):
             if self.record_kq_max:
                 self.kq_max = att.max().item()
                 if self.kq_weight_clip is not None:
-                    self.kq_max_h = att.amax(dim=(0, 2, 3), keepdim=False).detach().clamp_min(1e-12)
+                    smax_h = att.amax(dim=(0, 2, 3), keepdim=False).detach().clamp_min(1e-12)  # (n_head,)
+                    cur_ver = self.c_attn.weight._version
+                    # if weights haven't changed, we're still accumulating gradients
+                    # accumulate max across microbatches
+                    if self.kq_max_h is not None and self._kq_max_h_wver == cur_ver:
+                        self.kq_max_h = torch.maximum(self.kq_max_h, smax_h)
+                    else:
+                        self.kq_max_h = smax_h
+                        self._kq_max_h_wver = cur_ver 
+                        
             att = F.softmax(att, dim=-1)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side

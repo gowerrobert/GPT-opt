@@ -398,6 +398,7 @@ python run.py --config configs/shakespeare.yaml
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw.json small_adamw 2 
 `
 
+### Rho, mu grid search
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep.json small_fista  16
 `
@@ -406,5 +407,24 @@ python run.py --config configs/shakespeare.yaml
 `
 
 `
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_more_mu.json small_fista_mu  16
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_all_fista_it.json small_fista  16
+`
+
+### Lr sweep
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best1_lr_sweep.json small_fista_sweep  7
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best2_lr_sweep.json small_fista_sweep  7
+`
+
+### Baselines
+`
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq.json sm_sweep_lr_baselines 16
+`
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq_wclip.json sm_sweep_lr_baselines 7
 `

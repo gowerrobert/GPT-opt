@@ -151,7 +151,7 @@ class AttnPDAdamW(Optimizer):
         assert not missing, f"[AttnPDAdamW] Params with grad but no update: {missing}"
         return loss, residuals_n_layers
 
-
+    @torch.no_grad()
     def _update_kq_weights(self, p, g, group: dict[str, Any]):
         # interpret rows as [Q; K; V]
         pd_type = group["pd_type"] 

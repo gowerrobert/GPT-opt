@@ -120,7 +120,7 @@ def load_sweep_jsons(param_configs, script_name):
       - load only matching files from outputs/ and logs/
     """
     repo_root = _find_repo_root()
-    print(repo_root)
+    # print(repo_root)
 
     overrides_template = _extract_run_hydra_overrides(script_name)
     used_vars = _vars_in_overrides(overrides_template)
@@ -170,7 +170,7 @@ def load_sweep_jsons(param_configs, script_name):
             cfg = compose(config_name="config", overrides=overrides)
 
         expected[_format_filename_like_run_hydra(cfg)] = subs 
-    print(len(expected), len(list(product(*sweep_vals))))
+    assert len(expected) == len(list(product(*sweep_vals)))
 
     # Load only files with those basenames
     search_roots = [repo_root / "outputs", repo_root / "logs"]
@@ -198,7 +198,8 @@ def load_sweep_jsons(param_configs, script_name):
             ri_values = {
                     "path": path,
                     "final_train_loss": losses[-1],
-                    "min_val_loss": (min(val_losses) if isinstance(val_losses, list) and val_losses else float("nan")),
+                    "min_val_loss": (min(val_losses) if val_losses else float("nan")),
+                    "fin_val_loss": (val_losses[-1] if val_losses else float("nan")),
                     "kq_max": (kq_max.max() if kq_max.size else float("nan")),
                     "kq_median": (np.median(kq_max) if kq_max.size else float("nan")), 
                     "kq_mean": (kq_max.mean() if kq_max.size else float("nan")),
@@ -209,11 +210,12 @@ def load_sweep_jsons(param_configs, script_name):
 
     unused = set(expected.keys()) - set(used_names)
     if unused:
-        print(f"{unused=}")
+        print(f"Some files are missing: \n{unused}")
         for name in unused:
             print(expected[name])
     # print(search_roots)
     return pd.DataFrame(rows), unused
+
 
 
 
@@ -251,6 +253,7 @@ def plot_lr_sweep_over_models(
     colormap = {m: base_colors[i] for i, m in enumerate(models)}
     ylabel = {
         "min_val_loss": "Minimum Validation Loss",
+        "fin_val_loss": "Final Validation Loss",
         "final_train_loss": "Final Training Loss",
         "kq_max": "Maximum KQ Value",
         "kq_median": "Median KQ Value",
@@ -288,9 +291,12 @@ def plot_lr_sweep_over_models(
 
     ax.set_xlabel("Learning Rate")
     ax.set_ylabel(ylabel.get(ycol, ycol))
-    ax.legend(loc="upper right")
+
+    # legend outside (right)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+
     ax.grid(axis="both", lw=0.4, ls="--", zorder=0)
-    fig.subplots_adjust(top=0.95, bottom=0.15, left=0.15, right=0.95)
+    fig.subplots_adjust(top=0.95, bottom=0.15, left=0.15, right=0.78)
 
     # automatic y-limits + relative margin
     if all_y:
@@ -304,11 +310,9 @@ def plot_lr_sweep_over_models(
             ymin = float(np.min(y))
             ymax = float(np.max(y))
             if ylog:
-                # multiplicative padding in log space
                 pad = max(float(ymargin), 0.0)
                 ax.set_ylim(ymin / (10 ** pad), ymax * (10 ** pad))
             else:
-                # additive padding relative to range
                 pad = (ymax - ymin) * float(ymargin)
                 if pad == 0.0:
                     pad = abs(ymax) * float(ymargin) if ymax != 0 else 1e-6
@@ -318,24 +322,30 @@ def plot_lr_sweep_over_models(
         fig.savefig(outfilename, format="pdf", bbox_inches="tight")
     return fig, ax
 
-def plot_heatmat_grid(df_in: pd.DataFrame, cmap="viridis") -> None:
-    """Seaborn heatmap of min_val_loss over (mu_frac, rho_over_lr), sorted axes."""
 
+def plot_heatmat_grid(
+    df_in: pd.DataFrame,
+    cmap="viridis",
+    value="min_val_loss",
+    annotate=True,
+    sci_digits=1,      # digits after decimal in scientific notation inside cells
+    flag_best=True,
+    tick_fmt="g",      # axis tick format for mu_frac / rho_over_lr (e.g. "g", ".3e")
+    dpi=120,
+) -> None:
+    """Seaborn heatmap over (mu_frac, rho_over_lr), sorted axes, optional numbers + best-cell flag."""
     label = {
         "mu_frac": r"$\mu_{\text{frac}}$",
-        "rho_over_lr": r"$\rho/\mu$", 
+        "rho_over_lr": r"$\rho/\gamma$",
         "min_val_loss": "Minimum Validation Loss",
         "fin_val_loss": "Final Validation Loss",
         "final_train_loss": "Final Training Loss",
+        "kq_max": "Maximum KQ Value",
+        "kq_median": "Median KQ Value",
+        "kq_mean": "Mean KQ Value",
     }
 
-    def _pow10(x: float) -> str:
-        if x == 0 or not np.isfinite(x):
-            return r"$0$"
-        e = int(np.round(np.log10(abs(x))))
-        return rf"$10^{{{e}}}$"
-
-    req = ["mu_frac", "rho_over_lr", "min_val_loss"]
+    req = ["mu_frac", "rho_over_lr", value]
     missing = [c for c in req if c not in df_in.columns]
     if missing:
         raise KeyError(f"Missing columns: {missing}")
@@ -343,45 +353,59 @@ def plot_heatmat_grid(df_in: pd.DataFrame, cmap="viridis") -> None:
     df = df_in.copy()
     df["mu_frac"] = pd.to_numeric(df["mu_frac"], errors="coerce")
     df["rho_over_lr"] = pd.to_numeric(df["rho_over_lr"], errors="coerce")
-    df["min_val_loss"] = pd.to_numeric(df["min_val_loss"], errors="coerce")
+    df[value] = pd.to_numeric(df[value], errors="coerce")
     df = df.dropna(subset=req)
-
     if df.empty:
         print("No rows with required numeric columns.")
         return
 
-    # Sort x ascending; sort y ascending (then flip axis so it increases bottom->top)
     pivot = (
-        df.pivot_table(
-            index="rho_over_lr",
-            columns="mu_frac",
-            values="min_val_loss",
-            aggfunc="min",
-        )
-        .sort_index(axis=0)  # rho_over_lr ascending
-        .sort_index(axis=1)  # mu_frac ascending
+        df.pivot_table(index="rho_over_lr", columns="mu_frac", values=value, aggfunc="min")
+        .sort_index(axis=0)
+        .sort_index(axis=1)
     )
-
     if pivot.shape[0] < 2 or pivot.shape[1] < 2:
         print("Not enough variation in mu_frac/rho_over_lr for a heatmap.")
         return
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    annot_data, best_rc = None, None
+    if annotate:
+        fmt = f"{{:.{int(sci_digits)}e}}"
+        annot_data = pivot.applymap(lambda v: "" if pd.isna(v) else fmt.format(float(v)))
+        if flag_best:
+            s = pivot.stack(dropna=True)
+            if not s.empty:
+                best_rc = s.idxmin()  # (rho_over_lr, mu_frac)
+                annot_data.loc[best_rc[0], best_rc[1]] = "*" + fmt.format(float(pivot.loc[best_rc[0], best_rc[1]]))
+
+    fig, ax = plt.subplots(figsize=(6, 5), dpi=dpi)
     sns.heatmap(
         pivot,
         ax=ax,
         cmap=cmap,
-        cbar_kws={"label": label["min_val_loss"]},
+        cbar_kws={"label": label.get(value, value)},
+        annot=annot_data if annotate else False,
+        fmt="",
+        annot_kws={"fontsize": 6},
+        linewidths=0.025,          
+        linecolor="white", 
     )
 
-    # Make rho_over_lr increase bottom -> top
     ax.invert_yaxis()
-
     ax.set_xlabel(label["mu_frac"])
     ax.set_ylabel(label["rho_over_lr"])
-    ax.set_title(f"{label['min_val_loss']} over ({label['mu_frac']}, {label['rho_over_lr']})")
+    ax.set_title(f"{label.get(value, value)} over ({label['mu_frac']}, {label['rho_over_lr']})")
 
-    ax.set_xticklabels([_pow10(float(x)) for x in pivot.columns], rotation=45, ha="right")
-    ax.set_yticklabels([_pow10(float(y)) for y in pivot.index], rotation=0)
+    # exact mu_frac / rho_over_lr values on axes
+    ax.set_xticklabels([format(float(x), tick_fmt) for x in pivot.columns], rotation=45, ha="right")
+    ax.set_yticklabels([format(float(y), tick_fmt) for y in pivot.index], rotation=0)
 
-    fig.tight_layout()
+    if flag_best and best_rc is not None:
+        import matplotlib.patches as patches
+
+        r, c = best_rc
+        row = list(pivot.index).index(r)
+        col = list(pivot.columns).index(c)
+        ax.add_patch(patches.Rectangle((col, row), 1, 1, fill=False, edgecolor="red", linewidth=2.0))
+
+    fig.tight_layout() 
