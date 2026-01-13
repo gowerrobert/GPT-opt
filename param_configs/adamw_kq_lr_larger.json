@@ -1,0 +1,4 @@
+{
+    "lr": [0.05, 0.1, 0.5, 1.0],
+    "model": ["gpt-small-default", "gpt-small-lnorm", "gpt-small-softcap", "gpt-small-w-clip"]
+}

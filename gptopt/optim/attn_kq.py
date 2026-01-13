@@ -27,13 +27,15 @@ class AttnPDAdamW(Optimizer):
         rho_over_lr=10,         # ratio rho / lr
         attn_max_iter=100,
         momentum=False,
+        attn_momentum="",
         diag_scaling=False, 
         pd_type="fista",
         reflected_halpern: bool = False,
         warm_start: bool = False,
         enable_restart: bool = False,
         lsqr_max_iter: int = 500, 
-        mu_frac: float = 0.1 # fraction of mu_max, mu = mu_frac * mu_max
+        mu_frac: float = 0.1, # fraction of mu_max, mu = mu_frac * mu_max
+        bias_correction: bool = True
     ):
         params = []
         self.name_by_param = {}
@@ -51,18 +53,20 @@ class AttnPDAdamW(Optimizer):
             rho_over_lr=rho_over_lr,
             attn_max_iter=attn_max_iter, 
             momentum=momentum,
+            attn_momentum=attn_momentum,
             diag_scaling=diag_scaling, 
             pd_type=pd_type, 
             warm_start=warm_start,
             reflected_halpern=reflected_halpern,
             enable_restart=enable_restart,
             lsqr_max_iter=lsqr_max_iter,
-            mu_frac=mu_frac
+            mu_frac=mu_frac,
+            bias_correction=bias_correction
         )
         print(
             f"[AttnPDAdamW] lr={lr}, {betas=}, {eps=}, wd={weight_decay}, "
             f"{rho_over_lr=}, {attn_max_iter=}, {warm_start=}, {lsqr_max_iter=}"
-            f"{momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
+            f"{momentum=}, {attn_momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
         )
         super().__init__(params, defaults)
 
@@ -84,8 +88,8 @@ class AttnPDAdamW(Optimizer):
             beta1, beta2 = group["betas"]
             eps = group["eps"]
             wd = group["weight_decay"]
-            
-            momentum = group["momentum"]
+             
+            attn_momentum = group["attn_momentum"]
             
             for p in group["params"]:   
                 g = p.grad
@@ -94,17 +98,25 @@ class AttnPDAdamW(Optimizer):
                 state = self.state[p]
                 if "step" not in state:
                     state["step"] = 0
-                    state["moment1"] = torch.zeros_like(g)
-                    state["moment2"] = torch.zeros_like(g)
+                    if self.bias_correction:
+                        state["moment1"] = torch.zeros_like(g)
+                        state["moment2"] = torch.zeros_like(g)
+                    else: 
+                        state["moment1"] = g.clone()
+                        state["moment2"] = g.square()
                 state["step"] += 1
                 step = state["step"]
                 
-                bias_correction1 = 1 - beta1**step
-                bias_correction2 = 1 - beta2**step
+                if self.bias_correction:
+                    bias_correction1 = 1 - beta1**step
+                    bias_correction2 = 1 - beta2**step
+                else:
+                    bias_correction1 = 1.0
+                    bias_correction2 = 1.0
                 scale = bias_correction1 / bias_correction2**0.5
-
-                # TODO: momentum for FISTA 
-                if momentum: # whether to apply kq-max update on the momentum or raw gradient
+ 
+                # if momentum: # whether to apply kq-max update on the momentum or raw gradient
+                if attn_momentum == "prior":
                     buf1 = state["moment1"]
                     buf2 = state["moment2"]
                     buf1.lerp_(g, 1 - beta1)
@@ -114,14 +126,33 @@ class AttnPDAdamW(Optimizer):
                 name = self.name_by_param[p]
                 updated.add(name) 
                 if self._is_attn_qkv_weight(name) and p.ndim == 2:
-                    residuals = self._update_kq_weights(p, g, group)
+                    Z1_t, Z2_t,residuals = self._update_kq_weights(p, g, group)
+                    # Update weights in place
+                    A1, A2   = p[:n_embed, :], p[n_embed:2 * n_embed, :]
+                    if attn_momentum == "post":
+                        buf1 = state["moment1"]
+                        buf2 = state["moment2"]
+                        g_v = g[2 * n_embed: 3 * n_embed, :]
+                        # the order is [Q, K, V]
+                        g.copy_(torch.cat([Z2_t, Z1_t, g_v], dim=0))
+                        buf1.lerp_(g, 1 - beta1)
+                        buf2.lerp_(g.square(), 1 - beta2)
+                        g = buf1 / (eps + buf2.sqrt())
+                        Z1_t.copy_(g[n_embed:2 * n_embed, :])
+                        Z2_t.copy_(g[:n_embed, :]) 
+
+                    A2.data.add_(Z1_t)
+                    A1.data.add_(Z2_t)
+                    del Z1_t, Z2_t
+                    residuals["A1_norm"] = A1.norm().item()
+                    residuals["A2_norm"] = A2.norm().item()
                     residuals_n_layers[n_att_layers] = residuals
                     n_att_layers += 1
                     
                     # apply AdamW-style update (same rule here, but you could
                     # customize Q/K vs V if desired)
                     n_embed = p.shape[1] 
-                    if not momentum:
+                    if attn_momentum not in ["", "prior"]:
                         buf1 = state["moment1"]
                         buf2 = state["moment2"]
                         buf1.lerp_(g, 1 - beta1)
@@ -131,7 +162,7 @@ class AttnPDAdamW(Optimizer):
                     W_v.data.mul_(1 - lr * wd)
                     W_v.data.add_(G_v, alpha=-lr / scale)
                 else:
-                    if not momentum:
+                    if attn_momentum != "prior":
                         buf1 = state["moment1"]
                         buf2 = state["moment2"]
                         buf1.lerp_(g, 1 - beta1)
@@ -151,13 +182,13 @@ class AttnPDAdamW(Optimizer):
         assert not missing, f"[AttnPDAdamW] Params with grad but no update: {missing}"
         return loss, residuals_n_layers
 
+
     @torch.no_grad()
     def _update_kq_weights(self, p, g, group: dict[str, Any]):
         # interpret rows as [Q; K; V]
         pd_type = group["pd_type"] 
         lsqr_max_iter = group["lsqr_max_iter"] 
-        attn_max_iter = group["attn_max_iter"]
-
+        attn_max_iter = group["attn_max_iter"] 
         n_embed = p.shape[1] 
         assert p.shape[0] == 3 * n_embed
         # A1=W_q, A2=W_k, G1=G_k, G2=G_q
@@ -225,16 +256,11 @@ class AttnPDAdamW(Optimizer):
             Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
             norm_Y = Y_fista.pow(2).sum().sqrt().item() 
 
-        # Update weights in place
-        A2.data.add_(Z1_t)
-        A1.data.add_(Z2_t)
-        residuals["A1_norm"] = A1.norm().item()
-        residuals["A2_norm"] = A2.norm().item()
         residuals["G1_norm"] = G1.norm().item()
         residuals["G2_norm"] = G2.norm().item()
         residuals["Y_norm"] = norm_Y
         
-        return residuals
+        return Z1_t, Z2_t, residuals
 
 
 

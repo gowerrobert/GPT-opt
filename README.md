@@ -412,6 +412,9 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_all_fista_it.json small_fista  16
 `
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_20it.json small_fista_20it  16
+`
 
 ### Lr sweep
 `
@@ -420,6 +423,9 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best2_lr_sweep.json small_fista_sweep  7
 `
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best3_lr_sweep.json small_fista_sweep3  8
+`
 
 ### Baselines
 `
@@ -427,6 +433,12 @@ python run.py --config configs/shakespeare.yaml
 `
 `
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq_wclip.json sm_sweep_lr_baselines 7
+`
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq_lr_larger.json sm_larger_lr_baselines 16
+`
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw_kq_wclip.json sm_sweep_lr_wclip 11
 `
 
 ### Wandb sync

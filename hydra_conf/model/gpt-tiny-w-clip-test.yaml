@@ -1,0 +1,13 @@
+config:
+  n_embd: 768    # Hidden size used in distilgpt2
+  n_layer: 4    # Number of layers in distilgpt2
+  n_head: 8    # Number of attention heads in distilgpt2
+  vocab_size: 50257
+  flash_attention: true
+  record_kq_max: true
+  kq_layernorm: false
+  kq_logit_softcap: null # 50
+  kq_weight_clip: 10 # 100
+
+name: gpt-tiny
+kq_max_type: default # softcap, lnorm, default, w-clip

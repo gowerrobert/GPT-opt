@@ -79,6 +79,11 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                   "z":defaultdict(lambda: deque(maxlen=max_curves_per_layer)), 
                   "y":defaultdict(lambda: deque(maxlen=max_curves_per_layer))} 
     
+    # if model is w-clip
+    if model.config.kq_weight_clip is not None:
+        base_model = getattr(model, "module", model)
+        attnention_modules = [m for m in base_model.modules() if isinstance(m, CausalSelfAttention)]    
+    
     for epoch in range(training_params['num_epochs']):
         if master_process:
             print(f"Epoch {epoch+1} of {training_params['num_epochs']}")
@@ -120,6 +125,11 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                         optimizer.step(closure=None, loss=loss_accum)
                     else:
                         optimizer.step()
+                # post-processing step for w-clip 
+                if model.config.kq_weight_clip is not None:
+                    for m in attnention_modules:
+                        m.post_step_w_clip()
+
                 optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()

@@ -235,11 +235,6 @@ def plot_lr_sweep_over_models(
       - df["lr"] (x axis)
       - df[ycol] (y axis)
     """
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
     xcol = "lr"
     if xcol not in df.columns:
         raise KeyError(f"Missing column: {xcol}")
