@@ -8,6 +8,7 @@ optimizer_params:
   rho_over_lr: 1
   attn_max_iter: 100
   momentum: false  
+  attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
   warm_start: false
   mu_frac: 0.05
   pd_type: "fista" # "fista",  "pdhg"

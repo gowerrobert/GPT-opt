@@ -9,6 +9,7 @@ optimizer_params:
   attn_max_iter: 100
   lsqr_max_iter: 100
   momentum: false 
+  attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
   diag_scaling: true  
   warm_start: true
   pd_type: "pdhg" # "fista",  "pdhg"

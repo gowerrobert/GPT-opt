@@ -9,6 +9,7 @@ optimizer_params:
   attn_max_iter: 100
   lsqr_max_iter: 500
   momentum: false 
+  attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
   diag_scaling: false  
   enable_restart: true
   reflected_halpern: true

@@ -8,6 +8,7 @@ optimizer_params:
   rho_over_lr: 1
   attn_max_iter: 1000
   momentum: false 
+  attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
   diag_scaling: false  
   enable_restart: false
   reflected_halpern: true

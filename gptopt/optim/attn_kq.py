@@ -27,7 +27,7 @@ class AttnPDAdamW(Optimizer):
         rho_over_lr=10,         # ratio rho / lr
         attn_max_iter=100,
         momentum=False,
-        attn_momentum="",
+        attn_momentum="none",
         diag_scaling=False, 
         pd_type="fista",
         reflected_halpern: bool = False,
@@ -88,17 +88,17 @@ class AttnPDAdamW(Optimizer):
             beta1, beta2 = group["betas"]
             eps = group["eps"]
             wd = group["weight_decay"]
-             
+            bias_correction = group["bias_correction"]
             attn_momentum = group["attn_momentum"]
             
-            for p in group["params"]:   
+            for p in group["params"]:  
                 g = p.grad
                 if g is None:
                     continue
                 state = self.state[p]
                 if "step" not in state:
                     state["step"] = 0
-                    if self.bias_correction:
+                    if bias_correction:
                         state["moment1"] = torch.zeros_like(g)
                         state["moment2"] = torch.zeros_like(g)
                     else: 
@@ -106,8 +106,11 @@ class AttnPDAdamW(Optimizer):
                         state["moment2"] = g.square()
                 state["step"] += 1
                 step = state["step"]
+
+                buf1 = state["moment1"]
+                buf2 = state["moment2"]
                 
-                if self.bias_correction:
+                if bias_correction:
                     bias_correction1 = 1 - beta1**step
                     bias_correction2 = 1 - beta2**step
                 else:
@@ -115,34 +118,51 @@ class AttnPDAdamW(Optimizer):
                     bias_correction2 = 1.0
                 scale = bias_correction1 / bias_correction2**0.5
  
-                # if momentum: # whether to apply kq-max update on the momentum or raw gradient
-                if attn_momentum == "prior":
-                    buf1 = state["moment1"]
-                    buf2 = state["moment2"]
-                    buf1.lerp_(g, 1 - beta1)
-                    buf2.lerp_(g.square(), 1 - beta2)
-                    g = buf1 / (eps + buf2.sqrt())
-
                 name = self.name_by_param[p]
                 updated.add(name) 
                 if self._is_attn_qkv_weight(name) and p.ndim == 2:
-                    Z1_t, Z2_t,residuals = self._update_kq_weights(p, g, group)
+                    n_embed = p.shape[1] 
+                    # choose input to max-grad-update for Q/K only 
+                    if attn_momentum == "none":
+                        g_for_mgu = g
+                    elif attn_momentum == "prior_m":
+                        buf1[:2*n_embed].lerp_(g[:2*n_embed], 1 - beta1)
+                        buf2[:2*n_embed].lerp_(g[:2*n_embed].square(), 1 - beta2)
+                        g[:2*n_embed].copy_(buf1[:2*n_embed])
+                        g_for_mgu = g                  # M
+                    elif attn_momentum == "prior_mv":
+                        buf1[:2*n_embed].lerp_(g[:2*n_embed], 1 - beta1)
+                        buf2[:2*n_embed].lerp_(g[:2*n_embed].square(), 1 - beta2)
+                        g[:2*n_embed] = buf1[:2*n_embed] / (buf2[:2*n_embed].sqrt() + eps) / scale  # M / sqrt(V)
+                        g_for_mgu = g
+                    elif attn_momentum == "post":
+                        g_for_mgu = g
+                    else:
+                        raise ValueError(f"Unknown attn_momentum option: {attn_momentum}")
+
+                    Z1_t, Z2_t,residuals = self._update_kq_weights(p, g_for_mgu, group)
+
                     # Update weights in place
                     A1, A2   = p[:n_embed, :], p[n_embed:2 * n_embed, :]
-                    if attn_momentum == "post":
-                        buf1 = state["moment1"]
-                        buf2 = state["moment2"]
-                        g_v = g[2 * n_embed: 3 * n_embed, :]
-                        # the order is [Q, K, V]
-                        g.copy_(torch.cat([Z2_t, Z1_t, g_v], dim=0))
-                        buf1.lerp_(g, 1 - beta1)
-                        buf2.lerp_(g.square(), 1 - beta2)
-                        g = buf1 / (eps + buf2.sqrt())
-                        Z1_t.copy_(g[n_embed:2 * n_embed, :])
-                        Z2_t.copy_(g[:n_embed, :]) 
 
-                    A2.data.add_(Z1_t)
-                    A1.data.add_(Z2_t)
+                    if attn_momentum == "post": 
+                        # the order is [Q, K, V]
+                        # A1 = W_q, A2 = W_k
+                        # Z2 = \Delta W_q, Z1 = \Delta W_k
+                        m_qk, v_qk = buf1[:2*n_embed, :], buf2[:2*n_embed, :]                    # QK moments
+                        m_qk[:n_embed].lerp_(Z2_t, 1 - beta1)
+                        v_qk[:n_embed].lerp_(Z2_t.square(), 1 - beta2) 
+                        m_qk[n_embed:2*n_embed].lerp_(Z1_t, 1 - beta1)
+                        v_qk[n_embed:2*n_embed].lerp_(Z1_t.square(), 1 - beta2)
+
+                        g[:2*n_embed, :] = m_qk / (eps + v_qk.sqrt()) 
+                        A2.data.add_(g[n_embed:2 * n_embed, :], alpha=-lr / scale)
+                        A1.data.add_(g[:n_embed, :],            alpha=-lr / scale)
+                    else:
+                        # W^{k+1} = W^k + \Delta W
+                        A2.data.add_(Z1_t)
+                        A1.data.add_(Z2_t)
+
                     del Z1_t, Z2_t
                     residuals["A1_norm"] = A1.norm().item()
                     residuals["A2_norm"] = A2.norm().item()
@@ -151,23 +171,17 @@ class AttnPDAdamW(Optimizer):
                     
                     # apply AdamW-style update (same rule here, but you could
                     # customize Q/K vs V if desired)
-                    n_embed = p.shape[1] 
-                    if attn_momentum not in ["", "prior"]:
-                        buf1 = state["moment1"]
-                        buf2 = state["moment2"]
-                        buf1.lerp_(g, 1 - beta1)
-                        buf2.lerp_(g.square(), 1 - beta2)
-                        g = buf1 / (eps + buf2.sqrt())
-                    W_v, G_v = p[2 * n_embed: 3 * n_embed, :],  g[2 * n_embed: 3 * n_embed, :] 
+                    n_embed = p.shape[1]   
+                    buf1[2*n_embed : 3*n_embed].lerp_(g[2*n_embed : 3*n_embed], 1 - beta1)
+                    buf2[2*n_embed : 3*n_embed].lerp_(g[2*n_embed : 3*n_embed].square(), 1 - beta2)
+                    G_v = buf1[2*n_embed : 3*n_embed] / (eps + buf2[2*n_embed : 3*n_embed].sqrt())
+                    W_v = p[2 * n_embed: 3 * n_embed, :] 
                     W_v.data.mul_(1 - lr * wd)
                     W_v.data.add_(G_v, alpha=-lr / scale)
-                else:
-                    if attn_momentum != "prior":
-                        buf1 = state["moment1"]
-                        buf2 = state["moment2"]
-                        buf1.lerp_(g, 1 - beta1)
-                        buf2.lerp_(g.square(), 1 - beta2)
-                        g = buf1 / (eps + buf2.sqrt())
+                else:  
+                    buf1.lerp_(g, 1 - beta1)
+                    buf2.lerp_(g.square(), 1 - beta2)
+                    g = buf1 / (eps + buf2.sqrt())
                     p.data.mul_(1 - lr * wd)
                     p.data.add_(g, alpha=-lr / scale)
 

@@ -279,6 +279,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
                   'diag_scaling': opt_config.get('diag_scaling', True), 
+                  'attn_momentum': opt_config.get('attn_momentum', "none"),
                   'warm_start': opt_config.get('warm_start', False),
                   'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
                   } 
@@ -291,7 +292,8 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'attn_max_iter': opt_config.get('attn_max_iter', 100),
                   'pd_type': opt_config.get('pd_type', 'pdhg'),
                   'momentum': opt_config.get('momentum', False),
-                  'diag_scaling': opt_config.get('diag_scaling', True), 
+                  'diag_scaling': opt_config.get('diag_scaling', True),
+                  'attn_momentum': opt_config.get('attn_momentum', "none"), 
                   'reflected_halpern': opt_config.get('reflected_halpern', True), 
                   'warm_start': opt_config.get('warm_start', False),
                   'enable_restart': opt_config.get('enable_restart', False),
@@ -306,7 +308,7 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'attn_max_iter': opt_config.get('attn_max_iter', 100),
                   'pd_type': opt_config.get('pd_type', 'fista'),
                   'momentum': opt_config.get('momentum', False),
-                  'attn_momentum': opt_config.get('attn_momentum', ""),
+                  'attn_momentum': opt_config.get('attn_momentum', "none"),
                   "mu_frac": opt_config.get("mu_frac", 0.1),
                   "lsqr_max_iter": opt_config.get("lsqr_max_iter", 100)
                   }
