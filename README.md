@@ -415,6 +415,20 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_20it.json small_fista_20it  16
 `
+### Momentum, rho and mu
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_m.json sm_f_20it_pm  16
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_mv.json sm_f_20it_pmv  16
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_50it_prior_mv.json sm_f_50it_pmv  16
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep_50it_prior_m.json sm_f_50it_pm  16
+`
 
 ### Lr sweep
 `

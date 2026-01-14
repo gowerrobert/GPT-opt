@@ -66,7 +66,7 @@ class AttnPDAdamW(Optimizer):
         print(
             f"[AttnPDAdamW] lr={lr}, {betas=}, {eps=}, wd={weight_decay}, "
             f"{rho_over_lr=}, {attn_max_iter=}, {warm_start=}, {lsqr_max_iter=}"
-            f"{momentum=}, {attn_momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
+            f"{attn_momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
         )
         super().__init__(params, defaults)
 
