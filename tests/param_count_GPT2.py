@@ -33,6 +33,8 @@ def main():
     model = GPT(GPTConfig(**cfg), device)
     total = sum(p.numel() for p in model.parameters())
     print(f"Params: {total:,}")
+    for name, param in model.named_parameters():
+        print(f"{name}: shape={tuple(param.shape)}, count={param.numel():,}")
 
 if __name__ == "__main__":
     main()

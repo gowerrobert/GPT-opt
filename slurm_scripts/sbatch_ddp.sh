@@ -1,7 +1,7 @@
 #!/bin/bash
 # Note: partition, nodes, ntasks, gpus-per-task, constraint, and job-name are set via sbatch command-line args
 #SBATCH --cpus-per-task=16
-#SBATCH --time=40:00:00
+#SBATCH --time=120:00:00
 #SBATCH --output=slurm_logs/slurm_job_%j.out
 #SBATCH --error=slurm_logs/slurm_job_%j.err
 

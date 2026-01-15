@@ -6,4 +6,5 @@ optimizer_params:
   warm_up_fraction: 0.4
   # muon_lr: 0.01 
   muon_lr_ratio: 1.0          # allow override
+  truncate_loss: 3.2
 
