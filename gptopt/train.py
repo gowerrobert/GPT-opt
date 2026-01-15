@@ -166,11 +166,14 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                     if getattr(model.config, "record_kq_max", False):
                         base_model = getattr(model, "module", model)
                         kq_max = None
+                        # get maximum kq_max over all layers
                         for m in base_model.modules():
                             if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
                                 v = m.kq_max
                                 if kq_max is None or v > kq_max:
                                     kq_max = v
+                                # reset kq_max for minibatches
+                                m.kq_max = None
                         if kq_max is not None:
                             wandb_log_dict["train/kq_max"] = kq_max
                             logger.kq_max.append(kq_max)

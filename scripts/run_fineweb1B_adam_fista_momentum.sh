@@ -5,16 +5,18 @@ rho_over_lr=${2:-10}
 attn_max_iter=${3:-100}
 warm_start=${4:-false}
 momentum=${5:-false}
-mu_frac=${6:-0.1} 
+mu_frac=${6:-0.1}
+attn_momentum=${7:-"none"}
 
 
 python run_hydra.py \
     model=gpt-small-default \
-    optimizer=attn_fista_adamw \
+    optimizer=attn_fista_adamw_momentum \
     data=fineweb1B \
     optimizer.optimizer_params.lr=$lr \
     optimizer.optimizer_params.rho_over_lr=$rho_over_lr  \
     optimizer.optimizer_params.attn_max_iter=$attn_max_iter \
     optimizer.optimizer_params.warm_start=$warm_start \
     optimizer.optimizer_params.momentum=$momentum \
-    optimizer.optimizer_params.mu_frac=$mu_frac 
+    optimizer.optimizer_params.mu_frac=$mu_frac \
+    optimizer.optimizer_params.attn_momentum=$attn_momentum 

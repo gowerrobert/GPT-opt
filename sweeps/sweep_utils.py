@@ -278,6 +278,7 @@ def plot_lr_sweep_over_models(
             color=colormap.get(model, "#000000"),
             linestyle=None,
             linewidth=3.0,
+            alpha=0.8 
         )
 
     ax.set_xscale("log")

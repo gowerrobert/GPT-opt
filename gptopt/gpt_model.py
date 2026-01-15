@@ -109,7 +109,11 @@ class CausalSelfAttention(nn.Module):
             att = att.masked_fill(self.causal_mask[:,:,:T,:T] == 0, float('-inf'))
             # record max logit
             if self.record_kq_max:
-                self.kq_max = att.max().item()
+                if self.kq_max is None:
+                    self.kq_max = att.max().item()
+                else:
+                    # record maximum over all minibatches
+                    self.kq_max = max(self.kq_max, att.max().item())
                 if self.kq_weight_clip is not None:
                     smax_h = att.amax(dim=(0, 2, 3), keepdim=False).detach().clamp_min(1e-12)  # (n_head,) 
                     # if weights haven't changed, we're still accumulating gradients
