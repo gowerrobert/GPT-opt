@@ -1,0 +1,8 @@
+{
+    "lr": [1],
+    "rho_over_lr": [5],
+    "attn_max_iter": [20],
+    "warm_start": [false],
+    "momentum": [false],
+    "mu_frac": [0.5]
+}

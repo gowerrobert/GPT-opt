@@ -426,10 +426,7 @@ python run.py --config configs/shakespeare.yaml
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_mv.json sm_f_20it_pmv  16
 `
 `
-./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rho_mu_sweep_50it_prior_mv.json sm_f_50it_pmv  16
-`
-`
-./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rho_mu_sweep_50it_prior_m.json sm_f_50it_pm  16
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_mv_extra.json sm_f_20it_pmv  16
 `
 
 ### Lr sweep
@@ -447,6 +444,26 @@ python run.py --config configs/shakespeare.yaml
 `
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best5_lr_sweep.json sm_f_sw5  8
+`
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best3_lr_1.json small_fista_sweep3  1
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best4_lr_1.json sm_f_sw4  1
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best5_lr_1.json sm_f_sw5  1
+`
+
+
+#### Lr sweep with momentum
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rhomu_best6_lr_sweep.json sm_f_sw6  9
+`
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rhomu_best7_lr_sweep.json sm_f_sw7  9
 `
 
 ### Baselines

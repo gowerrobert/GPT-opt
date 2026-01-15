@@ -126,14 +126,13 @@ class AttnPDAdamW(Optimizer):
                     if attn_momentum == "none":
                         g_for_mgu = g
                     elif attn_momentum == "prior_m":
-                        buf1[:2*n_embed].lerp_(g[:2*n_embed], 1 - beta1)
-                        buf2[:2*n_embed].lerp_(g[:2*n_embed].square(), 1 - beta2)
-                        g[:2*n_embed].copy_(buf1[:2*n_embed])
+                        buf1[:2*n_embed].lerp_(g[:2*n_embed], 1 - beta1) 
+                        g[:2*n_embed].copy_(buf1[:2*n_embed] / bias_correction1)
                         g_for_mgu = g                  # M
                     elif attn_momentum == "prior_mv":
                         buf1[:2*n_embed].lerp_(g[:2*n_embed], 1 - beta1)
                         buf2[:2*n_embed].lerp_(g[:2*n_embed].square(), 1 - beta2)
-                        g[:2*n_embed] = buf1[:2*n_embed] / (buf2[:2*n_embed].sqrt() + eps) / scale  # M / sqrt(V)
+                        g[:2*n_embed] = (buf1[:2*n_embed] / (buf2[:2*n_embed].sqrt() + eps)) / scale  # M / sqrt(V)
                         g_for_mgu = g
                     elif attn_momentum == "post":
                         g_for_mgu = g
