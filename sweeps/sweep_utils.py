@@ -226,6 +226,8 @@ def plot_lr_sweep_over_models(
     ycol="min_val_loss",
     ylog=False,
     ymargin=0.05,
+    linewidth=3.0,
+    alpha=0.8
 ):
     """
     Plot a LR sweep from a DataFrame.
@@ -277,8 +279,8 @@ def plot_lr_sweep_over_models(
             label=str(model),
             color=colormap.get(model, "#000000"),
             linestyle=None,
-            linewidth=3.0,
-            alpha=0.8 
+            linewidth=linewidth,
+            alpha=alpha
         )
 
     ax.set_xscale("log")

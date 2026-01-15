@@ -44,6 +44,16 @@ def cvxpy_ls_l1_reg(W_k, W_q, G_wk, G_wq, beta, mu):
     return Y.value, -obj.value
 
 
+def cvxpy_lmax_smooth(W_k, W_q, G_wk, G_wq, beta, mu_moreau):
+    Z1, Z2 = cp.Variable(W_k.shape), cp.Variable(W_q.shape)
+    X = Z1.T @ W_q + W_k.T @ Z2
+    obj = cp.trace(G_wk.T @ Z1) + cp.trace(G_wq.T @ Z2) \
+           + (1/(2*mu_moreau)) * cp.sum_squares(cp.pos(cp.abs(X) - beta))
+    objective = cp.Minimize(obj)  
+    prob = cp.Problem(objective, [])
+    prob.solve(solver=cp.CLARABEL)
+    assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
+    return Z1.value, Z2.value, obj.value
 
 
 def plot_residuals(res, dpi=120):

@@ -39,6 +39,7 @@ class ResidualRecorder:
         *,
         pd_residuals: Optional[Callable[..., tuple[float, float, float, float]]] = None,
         mu: float = 0.0,
+        mu_moreau: float = 0.0,
         f_star: float | None = None,
         normalize: Literal["none", "by_first"] = "none",
         warmup_iters: int = 5,
@@ -48,7 +49,8 @@ class ResidualRecorder:
         self.pd_residuals = pd_residuals
         self.kw = dict(pd_residuals_kwargs)
         self.mu = float(self.kw.get("mu", mu))
-        self.kw.setdefault("mu", self.mu)
+        self.mu_moreau = float(self.kw.get("mu_moreau", mu_moreau))
+        self.kw.setdefault("mu", self.mu) 
         self.f_star = f_star
         self.normalize = normalize
         self.warmup_iters = int(warmup_iters)
@@ -59,7 +61,9 @@ class ResidualRecorder:
         self.r1_rel: list[float] = []
         self.r2_rel: list[float] = []
         self.r_rel: list[float] = []
+        self.r_true_res: list[float] = []
         self.dual_vals: list[float] = []
+        self.primal_vals: list[float] = []
         self.rel_gap: list[float] = []
         self._norm1: float | None = None
         self._norm2: float | None = None
@@ -67,9 +71,9 @@ class ResidualRecorder:
         self.y_norm: list[float] = []
 
 
-    def update(self, t: int, *, r1: float, r2: float, r1_rel=None, r2_rel=None, dual_val=None) -> None:
+    def update(self, t: int, *, r1: float, r2: float, r1_rel=None, r2_rel=None, dual_val=None, primal_val=None) -> None:
         self.r1.append(r1); self.r2.append(r2)
-
+        # if normalization by the first recorded residuals after warmup
         if self.normalize == "by_first" and self._norm1 is None and t >= self.warmup_iters:
             self._norm1 = max(r1, self.eps)
             self._norm2 = max(r2, self.eps)
@@ -77,12 +81,14 @@ class ResidualRecorder:
             r1_rel, r2_rel = r1 / self._norm1, r2 / self._norm2
         if r1_rel is not None and r2_rel is not None:
             self.r1_rel.append(r1_rel); self.r2_rel.append(r2_rel)
-
         if dual_val is not None: 
             self.dual_vals.append(dual_val)
             if self.f_star is not None:
                 self.rel_gap.append(np.abs(self.f_star - dual_val) / (abs(self.f_star) + 1e-12))
+        if primal_val is not None:
+            self.primal_vals.append(primal_val)
         self.r_rel.append(max(r1_rel, r2_rel))
+
 
     def record(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, dual_val=None):
         r1, r1_rel, r2, r2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
@@ -91,6 +97,20 @@ class ResidualRecorder:
         self.y_norm.append(Y.pow(2).sum().pow(0.5).item())
         self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, dual_val=dual_val)
         return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
+    
+
+    def record_true_relaxed_res(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, primal_val=None):
+        # record residuals wrt true objectice or relaxed/regularized problem
+        r1, r1_rel, r2, r2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
+        if self.mu_moreau > 0:
+            # the residuals wrt nesterov method
+            r1, r1_rel = 0, 0
+        
+        self.z_norm.append(Z.pow(2).sum().pow(0.5).item())
+        self.y_norm.append(Y.pow(2).sum().pow(0.5).item())
+        self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, primal_val=primal_val)
+        return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
+    
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"r1": self.r1, "r2": self.r2, "r1_rel": self.r1_rel, "r2_rel": self.r2_rel,
@@ -100,6 +120,8 @@ class ResidualRecorder:
             d["dual_vals"] = self.dual_vals
         if self.f_star is not None:
             d["rel_gap"] = self.rel_gap
+        if self.mu_moreau > 0:
+            d["primal_vals"] = self.primal_vals
         return d
 
     def get(self, key: str, default=None):
@@ -197,3 +219,4 @@ def pd_residuals_max_ball(A1, A2, Y, Z, G1, G2, beta, mu=0):
     r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=A1, A=A2, Y=Y, Z1=Z1, Z2=Z2, G1=G1, G2=G2, 
                                    beta=beta, mu=mu)
     return r1, r1_rel, r2, r2_rel
+
