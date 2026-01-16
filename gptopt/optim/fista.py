@@ -42,7 +42,8 @@ def fista_ls_l1_reg(A2: torch.Tensor,
     record = ResidualRecorder(pd_residuals=pd_residuals,
                                     A1=A1, A2=A2, G1=G1, G2=G2,
                                     beta=beta, mu=mu, f_star=f_star)
-    record.record(0, Y=Y_old, Z=(1 / mu) * (- G12 - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y_old)), dual_val=-np.inf)
+    record.record_without_relax_or_reg(0, Y=Y_old, 
+        Z=(1 / mu) * (- G12 - mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y_old)), dual_val=-np.inf)
     
     for t in range(1, max_iter+1):
         # Gradient step
@@ -60,7 +61,7 @@ def fista_ls_l1_reg(A2: torch.Tensor,
          
         dual_val = (-(mu/2) * (Z_fista).pow(2).sum() - beta * torch.sum(torch.abs(Y_new))).item()
             
-        r1, r1_rel, r2, r2_rel = record.record(t, Y=Y_new, Z=Z_fista, dual_val=dual_val)
+        r1, r1_rel, r2, r2_rel = record.record_without_relax_or_reg(t, Y=Y_new, Z=Z_fista, dual_val=dual_val)
 
         if attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
             break 

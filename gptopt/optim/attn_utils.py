@@ -99,7 +99,7 @@ class ResidualRecorder:
         return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
     
 
-    def record_true_relaxed_res(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, primal_val=None):
+    def record_without_relax_or_reg(self, t: int, *, Y: torch.Tensor, Z: torch.Tensor, primal_val=None, dual_val=None):
         # record residuals wrt true objectice or relaxed/regularized problem
         r1, r1_rel, r2, r2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
         if self.mu_moreau > 0:
@@ -108,7 +108,12 @@ class ResidualRecorder:
         
         self.z_norm.append(Z.pow(2).sum().pow(0.5).item())
         self.y_norm.append(Y.pow(2).sum().pow(0.5).item())
-        self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, primal_val=primal_val)
+        self.update(t, r1=r1, r2=r2, r1_rel=r1_rel, r2_rel=r2_rel, primal_val=primal_val, dual_val=dual_val)
+        # unregularized residuals / unsmoothed residuals
+        self.kw["mu"] = 0
+        _, tr1_rel, _, tr2_rel = self.pd_residuals(Y=Y, Z=Z, **self.kw)
+        self.kw["mu"] = self.mu
+        self.r_true_res.append(max(tr1_rel, tr2_rel))
         return self.r1[-1], self.r1_rel[-1], self.r2[-1], self.r2_rel[-1]
     
 
@@ -122,6 +127,8 @@ class ResidualRecorder:
             d["rel_gap"] = self.rel_gap
         if self.mu_moreau > 0:
             d["primal_vals"] = self.primal_vals
+        if self.r_true_res:
+            d["r_true_res"] = self.r_true_res
         return d
 
     def get(self, key: str, default=None):

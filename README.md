@@ -465,6 +465,12 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rhomu_best7_lr_sweep.json sm_f_sw7  9
 `
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rhomu_best8_lr_sweep.json sm_f_sw8  9
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista_momentum.sh param_configs/attn_fista_rhomu_best9_lr_sweep.json sm_f_sw9  9
+`
 
 ### Baselines
 `

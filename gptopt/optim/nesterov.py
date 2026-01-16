@@ -45,7 +45,7 @@ def nesterov_lmax_moreau(A2: torch.Tensor,
     AU = mathcal_A_linop(A1=A1, A2=A2, Z=Z_old)
     Y = (1/mu) * (AU - torch.clamp(AU, min=-beta, max=beta))
     primal_val = ((G12 * Z_old).sum() + (mu / (2)) * Y.pow(2).sum()).item()
-    record.record_true_relaxed_res(0, Z=Z_old, Y=Y, primal_val=primal_val)
+    record.record_without_relax_or_reg(0, Z=Z_old, Y=Y, primal_val=primal_val)
 
     step_size = mu / lamb_max**2
     
@@ -61,7 +61,7 @@ def nesterov_lmax_moreau(A2: torch.Tensor,
         Z_old = Z
                    
         primal_val = ((G12 * Z).sum() + (mu / (2)) * Y.pow(2).sum()).item()
-        r1, r1_rel, r2, r2_rel = record.record_true_relaxed_res(t, Y=Y, Z=Z, primal_val=primal_val)
+        r1, r1_rel, r2, r2_rel = record.record_without_relax_or_reg(t, Y=Y, Z=Z, primal_val=primal_val)
 
         if attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
             break 

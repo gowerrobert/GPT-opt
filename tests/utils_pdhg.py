@@ -7,6 +7,7 @@ from glob import glob
 import pandas as pd
 
 from gptopt.optim.fast_pdhg import pdhg_kq_attn_layer
+from gptopt.optim.nesterov import nesterov_lmax_moreau
 from gptopt.optim.attn_kq import prox_l1, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
 from gptopt.optim.myadamw import MyAdamW
 from gptopt.train import Logging, eval_validation_loss
@@ -176,16 +177,6 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
                     "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
                     "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
     }  
-    # if A.numel() <= 75**2 and mu_reg==0:
-    #     from lp_cupdlpx import cupdlpx_AB
-    #     Z1, Z2, f_star2, Y = cupdlpx_AB( G1, G2, A, B, beta, time_limit=180, iter_limit=100_000,
-    #         eps_feas=1e-7, eps_opt=1e-7, feasibility_polishing=True, eps_feas_polish=1e-8)
-    #     r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(B=B, A=A, Y=Y, Z1=Z1, Z2=Z2,  
-    #                                                     G1=G1, G2=G2, beta=beta, mu=0, abs_tol=1e-4)
-
-    #     residuals["cupdlpx"] = {"r1": [r1]*max_iter, "r1_rel": [r1_rel]*max_iter, "r2": [r2]*max_iter, "r2_rel": [r2_rel]*max_iter}  
-    #     metrics["cupdlpx"] = { "obj": func_obj(Z1, Z2), "viol": func_constr_viol(Z1, Z2)}
-    #     print(f"{f_star2=}, {f_star=}")
 
     if mu_reg > 0:
         _, Z_t, res = fista_ls_l1_reg(
@@ -208,6 +199,84 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
     return residuals
 
 
+def compare_methods_fista_nesterov(A, B, G1, G2, beta, mu_reg, mu_moreau,
+                    Z1_0=None, Z2_0=None, Y0=None,
+                    max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball,
+                    eps_abs=1e-8, eps_rel=1e-8):
+
+    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()  
+    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
+
+    metrics = {} 
+
+    residuals = {}
+    m = A.shape[0]
+    if Z1_0 is None: 
+        Z0 = None
+    else:
+        Z0 = torch.cat([Z1_0, Z2_0], dim=0) 
+    if Z0 is not None and Y0 is not None:
+        metrics["init"] = {
+                    "obj": func_obj(Z0[:m, :], Z0[m:, :]),
+                    "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])}
+
+    _, Z_t, res = fista_ls_l1_reg(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu_reg, max_iter=max_iter,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            Y0=Y0, pd_residuals=pd_residuals
+        )
+    residuals["fista"] = res  
+    metrics["fista"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        
+    G12 = torch.cat([G1, G2], dim=0)
+    AG_max = mathcal_A_linop(A1=B, A2=B, Z=G12).abs().max().item()
+    Z0 = - (beta * 1.2 / AG_max) * G12
+    Z_t, res = nesterov_lmax_moreau(
+                A2=A, A1=B, G1=G1, G2=G2,
+                beta=beta, mu=mu_moreau, 
+                max_iter=max_iter, Z0=Z0,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                pd_residuals=pd_residuals
+            )
+    residuals["nesterov G init"] = res  
+    metrics["nesterov G init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+      
+    Z0 = torch.randn(2 * G1.shape[0], G1.shape[1], device=G1.device, dtype=G1.dtype)
+    AZ_max = mathcal_A_linop(A1=B, A2=B, Z=Z0).abs().max().item()
+    Z0 = (beta * 1.2 / AZ_max) * Z0
+    Z_t, res = nesterov_lmax_moreau(
+                A2=A, A1=B, G1=G1, G2=G2,
+                beta=beta, mu=mu_moreau, 
+                max_iter=max_iter, Z0=Z0,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                pd_residuals=pd_residuals
+            )
+    residuals["nesterov rand init"] = res  
+    metrics["nesterov rand init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+      
+    Z0 = None
+    Z_t, res = nesterov_lmax_moreau(
+                A2=A, A1=B, G1=G1, G2=G2,
+                beta=beta, mu=mu_moreau, 
+                max_iter=max_iter, Z0=Z0,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                pd_residuals=pd_residuals
+            )
+    residuals["nesterov zero init"] = res  
+    metrics["nesterov zero init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+      
+
+    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
+    print(header)
+    print("-" * len(header))
+    for method in metrics.keys(): 
+        m = metrics[method]
+        print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
+
+    return residuals
+
+
 
 def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
                               abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
@@ -215,6 +284,58 @@ def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
         res_all, param_name="mu", dual_scale=dual_scale, dpi=dpi,
         abs_ylim=abs_ylim, rel_ylim=rel_ylim, gap_ylim=gap_ylim, dual_ylim=dual_ylim
     )
+
+
+def plot_residuals_grid_by_param_appprox_vs_true(res_all, dpi=120,
+                                 abs_ylim=None, rel_ylim=None):
+    plabel = "μ1, μ2"
+    pvals = sorted(res_all) if len(res_all) else []
+    methods = sorted({m for D in res_all.values() for m in D})
+    colors = {m: plt.cm.Set2(i / max(1, len(methods)-1)) for i, m in enumerate(methods)}
+    sample = next(iter(res_all.values()), {})
+    vals = sample.values() if isinstance(sample, dict) else [] 
+    ncols = 2
+
+    fig, axs = plt.subplots(max(1, len(pvals)), ncols, figsize=(5*ncols, 3.2*max(1, len(pvals))), dpi=dpi)
+    axs = np.atleast_2d(axs)
+
+    approx_rel_keys = [("r_rel", "-")] 
+    true_rel_keys   = [("r_true_res", "-")] 
+
+    specs = [
+        (0, true_rel_keys,   abs_ylim, "Original", "log"),
+        (1, approx_rel_keys, rel_ylim, "Relaxed", "log"),
+    ]
+
+    for r, pv in enumerate(pvals if pvals else [None]):
+        D = res_all[pv] if pvals else {}
+        for c, keys, ylim, title, yscale in specs:
+            any_ = False
+            a = axs[r, c]
+            for m in methods:
+                res = D.get(m, {})
+                for k, ls in keys:
+                    v = res.get(k, [])
+                    if len(v):
+                        a.plot(v, color=colors[m], ls=ls); any_ = True
+            if any_:
+                if yscale == "symlog":
+                    a.set_yscale("symlog", linthresh=1e-6)
+                elif yscale:
+                    a.set_yscale(yscale)
+                if ylim is not None:
+                    a.set_ylim(ylim)
+                label = f"{plabel}={pv} | {title}" if pv is not None else title
+                a.set(title=label, xlabel="iter", ylabel="residuals")
+                a.grid(True, which="both", ls="--", alpha=0.4)
+            else:
+                a.axis("off")
+
+    handles = [plt.Line2D([0],[0], color=colors[m], ls='-') for m in methods]
+    fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
+    plt.tight_layout(rect=[0,0,0.985,1])
+    return fig, axs
+
 
 
 
