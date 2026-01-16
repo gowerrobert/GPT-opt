@@ -455,6 +455,9 @@ python run.py --config configs/shakespeare.yaml
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best5_lr_1.json sm_f_sw5  1
 `
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rhomu_best5p5_lr_sweep.json sm_f_sw5p5  8
+`
 
 
 #### Lr sweep with momentum

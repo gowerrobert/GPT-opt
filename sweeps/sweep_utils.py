@@ -217,6 +217,196 @@ def load_sweep_jsons(param_configs, script_name):
     return pd.DataFrame(rows), unused
 
 
+def load_sweep_jsons_all(d_conf):
+    """
+    Load ONLY JSONs that would be written by run_hydra.py for multiple models.
+
+    Expected d_conf format:
+        d_conf = {
+            model_name: (param_configs, list_scripts),
+            ...
+        }
+
+    Where:
+      - param_configs: path (or JSON-able) sweep config like before
+      - list_scripts: a script path/name OR a list/tuple of script paths/names
+
+    Mechanism:
+      - for each (model, script): compute the exact set of expected output basenames
+      - scan outputs/ and logs/ ONCE, loading only matching basenames
+      - add "model" column = model_name for each matched row
+
+    Returns:
+      (df, missing_by_model)
+        - df: pd.DataFrame of matched runs
+        - missing_by_model: dict[model_name -> set(basenames)] that were expected but not found
+    """
+    repo_root = _find_repo_root()
+
+    from pathlib import Path
+    from itertools import product
+    import json
+    import numpy as np
+    import pandas as pd
+    from glob import glob
+
+    def _as_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple, set)):
+            return list(x)
+        return [x]
+
+    def _resolve_under_repo(p):
+        p = Path(p)
+        if p.is_absolute():
+            return p
+        cand = repo_root / p
+        return cand if cand.exists() else p
+
+    # -----------------------------
+    # 1) Precompute expected basenames for *all* models/scripts
+    # -----------------------------
+    hydra_conf_dir = repo_root / "hydra_conf"
+    if not hydra_conf_dir.exists():
+        raise FileNotFoundError(f"Expected hydra config dir at {hydra_conf_dir}")
+
+    # basename -> list[meta], where meta contains sweep vars + model/script
+    expected_by_name = {}
+    expected_names_by_model = {m: set() for m in d_conf.keys()}
+
+    from hydra import initialize_config_dir, compose
+    from hydra.core.global_hydra import GlobalHydra
+
+    for model_name, (param_configs, list_scripts) in d_conf.items():
+        scripts = _as_list(list_scripts)
+        if not scripts:
+            continue
+
+        sweep_cfg = _read_json(param_configs)
+
+        for script_name in scripts:
+            script_path = _resolve_under_repo(script_name)
+
+            overrides_template = _extract_run_hydra_overrides(str(script_path))
+            used_vars = _vars_in_overrides(overrides_template)
+
+            var_defaults = _parse_bash_var_defaults(str(script_path))
+
+            # Build sweep values (strings) for each used bash var
+            sweep_vars = []
+            sweep_vals = []
+            for v in sorted(used_vars):
+                if v in sweep_cfg:
+                    vals = sweep_cfg[v]
+                    if not isinstance(vals, list):
+                        vals = [vals]
+                    sweep_vars.append(v)
+                    sweep_vals.append([str(x) for x in vals])
+                elif v in var_defaults:
+                    sweep_vars.append(v)
+                    sweep_vals.append([str(var_defaults[v])])
+                else:
+                    raise ValueError(
+                        f"Variable '${v}' is used in {script_path} run_hydra overrides, "
+                        f"but not found in {param_configs} and no default like {v}=${{...:-...}} was parsed."
+                    )
+
+            # sanity: ensure this sweep maps 1-1 to unique output basenames (like original assert)
+            n_combos = 1
+            for vals in sweep_vals:
+                n_combos *= len(vals)
+
+            local_names = set()
+
+            GlobalHydra.instance().clear()
+            with initialize_config_dir(config_dir=str(hydra_conf_dir), version_base=None):
+                for combo in product(*sweep_vals):
+                    subs = dict(zip(sweep_vars, combo))
+
+                    overrides = []
+                    for t in overrides_template:
+                        tt = t
+                        for k, val in subs.items():
+                            tt = tt.replace(f"${{{k}}}", val).replace(f"${k}", val)
+                        overrides.append(tt)
+
+                    cfg = compose(config_name="config", overrides=overrides)
+                    basename = _format_filename_like_run_hydra(cfg)
+
+                    local_names.add(basename)
+
+                    meta = {"model": model_name, "script": script_path.name} | subs
+                    expected_by_name.setdefault(basename, []).append(meta)
+                    expected_names_by_model[model_name].add(basename)
+
+            if len(local_names) != n_combos:
+                raise AssertionError(
+                    f"{script_path}: expected {n_combos} unique output basenames, got {len(local_names)}. "
+                    "This usually means different sweep combos collapse to the same output filename."
+                )
+
+    # -----------------------------
+    # 2) Scan filesystem ONCE and load only matching basenames
+    # -----------------------------
+    search_roots = [repo_root / "outputs", repo_root / "logs"]
+    rows = []
+    used_names = set()
+    found_names_by_model = {m: set() for m in d_conf.keys()}
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+
+        for path in glob(str(root / "**" / "*.json"), recursive=True):
+            name = Path(path).name
+            metas = expected_by_name.get(name)
+            if not metas:
+                continue
+
+            used_names.add(name)
+
+            try:
+                d = json.loads(Path(path).read_text())
+            except Exception:
+                continue
+
+            losses = d.get("losses", [])
+            val_losses = d.get("val_losses", [])
+            kq_max = np.array(d.get("kq_max", []))
+
+            if not isinstance(losses, list) or not losses:
+                continue
+
+            metrics = {
+                "path": path,
+                "final_train_loss": losses[-1],
+                "min_val_loss": (min(val_losses) if val_losses else float("nan")),
+                "fin_val_loss": (val_losses[-1] if val_losses else float("nan")),
+                "kq_max": (kq_max.max() if kq_max.size else float("nan")),
+                "kq_median": (np.median(kq_max) if kq_max.size else float("nan")),
+                "kq_mean": (kq_max.mean() if kq_max.size else float("nan")),
+            }
+
+            # if multiple model/script configs map to same basename, emit one row per meta
+            for meta in metas:
+                found_names_by_model[meta["model"]].add(name)
+                rows.append(metrics | meta)
+
+    # -----------------------------
+    # 3) Missing expected files (per model)
+    # -----------------------------
+    missing_by_model = {}
+    for model_name, expected_names in expected_names_by_model.items():
+        missing = set(expected_names) - set(found_names_by_model.get(model_name, set()))
+        missing_by_model[model_name] = missing
+        if missing:
+            print(f"[{model_name}] Some files are missing ({len(missing)}):")
+            for name in sorted(missing):
+                print(" ", name)
+
+    return pd.DataFrame(rows), missing_by_model
+
 
 
 def plot_lr_sweep_over_models(
@@ -224,10 +414,12 @@ def plot_lr_sweep_over_models(
     colormap="husl",
     outfilename=None,
     ycol="min_val_loss",
+    xcol="lr",
     ylog=False,
     ymargin=0.05,
     linewidth=3.0,
-    alpha=0.8
+    alpha=0.8,
+    title=""
 ):
     """
     Plot a LR sweep from a DataFrame.
@@ -236,8 +428,7 @@ def plot_lr_sweep_over_models(
       - df["model"] (line grouping)
       - df["lr"] (x axis)
       - df[ycol] (y axis)
-    """
-    xcol = "lr"
+    """ 
     if xcol not in df.columns:
         raise KeyError(f"Missing column: {xcol}")
     if "model" not in df.columns:
@@ -255,7 +446,12 @@ def plot_lr_sweep_over_models(
         "kq_max": "Maximum KQ Value",
         "kq_median": "Median KQ Value",
         "kq_mean": "Mean KQ Value",
+        "r_true_res": "True PD Residual",
+        "r_res": "Private PD Residual",
     }
+
+    xlabel = {"lr": "Learning Rate",
+              "mu": r"$\mu$"}[xcol]
 
     fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -287,7 +483,7 @@ def plot_lr_sweep_over_models(
     if ylog:
         ax.set_yscale("log")
 
-    ax.set_xlabel("Learning Rate")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel.get(ycol, ycol))
 
     # legend outside (right)
@@ -315,6 +511,8 @@ def plot_lr_sweep_over_models(
                 if pad == 0.0:
                     pad = abs(ymax) * float(ymargin) if ymax != 0 else 1e-6
                 ax.set_ylim(ymin - pad, ymax + pad)
+    if title:
+        ax.set_title(title)
 
     if outfilename:
         fig.savefig(outfilename, format="pdf", bbox_inches="tight")

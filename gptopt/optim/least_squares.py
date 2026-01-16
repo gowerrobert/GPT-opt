@@ -293,6 +293,7 @@ def matcal_AAT_to_kron_Kron(A1, A2):
     K = torch.kron(In, A2tA2) + torch.kron(A1tA1, Ip)  # [(n^2) x (n^2)]
     return K
 
+
 @torch.no_grad()
 def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
                     diag_scaling=True, maxit=1000, tol=1e-10, debug=False, lambda_reg0=0.0):

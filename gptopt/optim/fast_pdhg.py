@@ -274,7 +274,7 @@ def pdhg_kq_attn_layer(
     if verbose:
         print(f"||A||_op <= {lamb_max:.4e}")
 
-    record.record(0, Y=Y, Z=Z)
+    record.record_without_relax_or_reg(0, Y=Y, Z=Z)
     state = PDHGSolverState(Z=Z, Y=Y, A1=A1, A2=A2)
     if enable_restart:
         restart_params = RestartParams()
@@ -312,7 +312,7 @@ def pdhg_kq_attn_layer(
         if mu > 0 and h_conj is not None: 
             dual_val = (- h_conj(Y_new) - (1/(2 * mu)) * (mathcal_A_adj_linop(A1=A1, A2=A2, Y=Y_new) + Grad).pow(2).sum()).item()
   
-        r1, r1_rel, r2, r2_rel = record.record(t, Y=Y_new, Z=Z_new, dual_val=dual_val)
+        r1, r1_rel, r2, r2_rel = record.record_without_relax_or_reg(t, Y=Y_new, Z=Z_new, dual_val=dual_val)
 
         state.relative_dual_residual = r2_rel
 

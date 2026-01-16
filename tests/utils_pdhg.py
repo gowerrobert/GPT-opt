@@ -277,6 +277,194 @@ def compare_methods_fista_nesterov(A, B, G1, G2, beta, mu_reg, mu_moreau,
     return residuals
 
 
+def compare_methods_fista_nesterov_mu(A, B, G1, G2, beta, mu_range_fista,
+                                      mu_range_nesterov,
+                    Z1_0=None, Z2_0=None, Y0=None,
+                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball,
+                    eps_abs=1e-8, eps_rel=1e-8):
+
+    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()
+    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
+    mu_max = (G1.t() @ B + A.t() @ G2).abs().max().item() / beta
+
+    metrics = {}
+    m = A.shape[0]
+
+    # rows for residual dataframe
+    rows = []
+
+    if Z1_0 is not None and Z2_0 is not None:
+        Z0 = torch.cat([Z1_0, Z2_0], dim=0)
+    else:
+        Z0 = None
+
+    if Z0 is not None and Y0 is not None:
+        metrics["init"] = {
+            "obj": func_obj(Z0[:m, :], Z0[m:, :]),
+            "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])
+        }
+ 
+    for mu_scale in mu_range_fista:
+        mu = mu_scale * mu_max
+        metrics[mu_scale] = {}
+
+        # --- FISTA ---
+        _, Z_t, res = fista_ls_l1_reg(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu, max_iter=max_iter,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            Y0=Y0, pd_residuals=pd_residuals
+        ) 
+        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
+        metrics[mu_scale]["fista"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+
+    for mu_scale in mu_range_nesterov:
+        mu = mu_scale * mu_max
+        if mu_scale not in metrics:
+            metrics[mu_scale] = {}
+        
+        # --- Nesterov (G init) ---
+        G12 = torch.cat([G1, G2], dim=0)
+        AG_max = mathcal_A_linop(A1=B, A2=B, Z=G12).abs().max().item()
+        Z0n = - (beta * 1.2 / AG_max) * G12
+        Z_t, res = nesterov_lmax_moreau(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu,
+            max_iter=max_iter, Z0=Z0n,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            pd_residuals=pd_residuals
+        ) 
+        rows.append({"model": "nesterov G init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
+        metrics[mu_scale]["nesterov G init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+
+        # --- Nesterov (rand init) ---
+        Z0n = torch.randn(2 * G1.shape[0], G1.shape[1], device=G1.device, dtype=G1.dtype)
+        AZ_max = mathcal_A_linop(A1=B, A2=B, Z=Z0n).abs().max().item()
+        Z0n = (beta * 1.2 / AZ_max) * Z0n
+        Z_t, res = nesterov_lmax_moreau(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu,
+            max_iter=max_iter, Z0=Z0n,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            pd_residuals=pd_residuals
+        )
+        rows.append({"model": "nesterov rand init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
+        metrics[mu_scale]["nesterov rand init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+
+        # --- Nesterov (zero init) ---
+        Z_t, res = nesterov_lmax_moreau(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu,
+            max_iter=max_iter, Z0=None,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            pd_residuals=pd_residuals
+        )
+        rows.append({"model": "nesterov zero init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
+        metrics[mu_scale]["nesterov zero init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+
+    df_residuals = (pd.DataFrame(rows)
+                      .sort_values(["model", "mu"])
+                      .reset_index(drop=True))
+    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12} {'Mu':>12}"
+    print(header)
+    print("-" * len(header))
+    for mu in metrics.keys():
+        for method in metrics[mu].keys(): 
+            m = metrics[mu][method]
+            print(f"{method:<20}  {m['obj']:>12.6e}  {m['viol']:>12.6e}  {mu:>.4e}")
+    return df_residuals
+
+
+def compare_methods_fista_pdhg_mu(A, B, G1, G2, beta, mu_range_fista,
+                    mu_range_pdhg,
+                    Z1_0=None, Z2_0=None, Y0=None,
+                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball,
+                    eps_abs=1e-8, eps_rel=1e-8):
+
+    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()
+    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
+    mu_max = (G1.t() @ B + A.t() @ G2).abs().max().item() / beta
+
+    metrics = {}
+    m = A.shape[0]
+
+    # rows for residual dataframe
+    rows = []
+
+    if Z1_0 is not None and Z2_0 is not None:
+        Z0 = torch.cat([Z1_0, Z2_0], dim=0)
+    else:
+        Z0 = None
+
+    if Z0 is not None and Y0 is not None:
+        metrics["init"] = {
+            "obj": func_obj(Z0[:m, :], Z0[m:, :]),
+            "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])
+        }
+
+    settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+             "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False}, 
+           "ada rehpdhg":{"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}}
+    
+ 
+    for mu_scale in mu_range_fista:
+        mu = mu_scale * mu_max
+        metrics[mu_scale] = {}
+
+        # --- FISTA ---
+        _, Z_t, res = fista_ls_l1_reg(
+            A2=A, A1=B, G1=G1, G2=G2,
+            beta=beta, mu=mu, max_iter=max_iter,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+            Y0=Y0, pd_residuals=pd_residuals
+        ) 
+        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
+        metrics[mu_scale]["fista"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+
+    prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
+    h_conj = lambda y: beta * torch.abs(y).sum()
+
+    for mu_scale in mu_range_pdhg:
+        mu = mu_scale * mu_max
+        if mu_scale not in metrics:
+            metrics[mu_scale] = {}
+        
+        for setting in settings:
+            if mu > 0 and "ada" in setting: 
+                # only for adaptive restart for mu=0
+                continue
+            # Run torch PDHG
+            Z_t, res, _, _ = pdhg_kq_attn_layer(
+                prox_h_conj, A2=A, A1=B, G1=G1, G2=G2,
+                max_iter=max_iter, eps_abs=eps_abs, eps_rel=eps_rel,
+                stopping=stopping, Y0=Y0, Z0=Z0,
+                h_conj=h_conj, beta=beta, pd_residuals=pd_residuals, mu=mu,
+                diag_scaling=settings[setting]["diag_scaling"], 
+                equilibration=settings[setting]["equilibration"],
+                reflected_halpern=settings[setting]["reflected_halpern"],
+                enable_restart=settings[setting]["enable_restart"],
+                verbose=False
+            )
+            rows.append({"model": setting, "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]}) 
+            metrics[mu_scale][setting] = {
+                        "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
+                        "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
+    } 
+
+    df_residuals = (pd.DataFrame(rows)
+                      .sort_values(["model", "mu"])
+                      .reset_index(drop=True))
+    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12} {'Mu':>12}"
+    print(header)
+    print("-" * len(header))
+    for mu in metrics.keys():
+        for method in metrics[mu].keys(): 
+            m = metrics[mu][method]
+            print(f"{method:<20}  {m['obj']:>12.6e}  {m['viol']:>12.6e}  {mu:>.4e}")
+    return df_residuals
+
+
+
 
 def plot_residuals_grid_by_mu(res_all, dual_scale=False, dpi=120,
                               abs_ylim=None, rel_ylim=None, gap_ylim=None, dual_ylim=None):
@@ -335,7 +523,6 @@ def plot_residuals_grid_by_param_appprox_vs_true(res_all, dpi=120,
     fig.legend(handles, methods, loc="center left", bbox_to_anchor=(0.985, 0.5), frameon=False, title="Methods")
     plt.tight_layout(rect=[0,0,0.985,1])
     return fig, axs
-
 
 
 

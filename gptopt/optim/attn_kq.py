@@ -220,15 +220,16 @@ class AttnPDAdamW(Optimizer):
         h_conj = lambda y: beta * torch.abs(y).sum()
         assert A1.shape == G2.shape and A2.shape == G1.shape
 
-        if group["warm_start"]:
+        if group["warm_start"] or attn_max_iter == 0:
             Y0, _ = Y_dual_feasible(A1=A1, A2=A2, G1=G1, G2=G2, method="lsqr", maxit=lsqr_max_iter) 
-            (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
+            if pd_type != "fista" or attn_max_iter == 0:
+                (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
                                                     X_type="Z", Y0=Y0, beta=beta, 
                                 tol=1e-10, maxit=lsqr_max_iter, diag_scaling=True)
         else:
             Y0, Z1_0, Z2_0 = None, None, None
 
-        if attn_max_iter == 0: # use values directly from LSQR
+        if attn_max_iter == 0: # use values directly from LSQR 
             Z1_t, Z2_t = Z1_0, Z2_0
             residuals = res
             r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
