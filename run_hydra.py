@@ -144,7 +144,7 @@ def main(config : DictConfig):
             **wandb_args,
             config=wandb_config,
             reinit='create_new',
-            mode="offline",
+            # mode="offline",
             tags=tags
         )
     else:

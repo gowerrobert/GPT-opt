@@ -342,22 +342,16 @@ def compare_methods_fista_nesterov_mu(A, B, G1, G2, beta, mu_range_fista,
         AZ_max = mathcal_A_linop(A1=B, A2=B, Z=Z0n).abs().max().item()
         Z0n = (beta * 1.2 / AZ_max) * Z0n
         Z_t, res = nesterov_lmax_moreau(
-            A2=A, A1=B, G1=G1, G2=G2,
-            beta=beta, mu=mu,
-            max_iter=max_iter, Z0=Z0n,
-            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-            pd_residuals=pd_residuals
+            A2=A, A1=B, G1=G1, G2=G2, beta=beta, mu=mu, max_iter=max_iter, Z0=Z0n, eps_abs=eps_abs, 
+            eps_rel=eps_rel, stopping=stopping, pd_residuals=pd_residuals
         )
         rows.append({"model": "nesterov rand init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
         metrics[mu_scale]["nesterov rand init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
 
         # --- Nesterov (zero init) ---
         Z_t, res = nesterov_lmax_moreau(
-            A2=A, A1=B, G1=G1, G2=G2,
-            beta=beta, mu=mu,
-            max_iter=max_iter, Z0=None,
-            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-            pd_residuals=pd_residuals
+            A2=A, A1=B, G1=G1, G2=G2, beta=beta, mu=mu, max_iter=max_iter, Z0=None,
+            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping, pd_residuals=pd_residuals
         )
         rows.append({"model": "nesterov zero init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
         metrics[mu_scale]["nesterov zero init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
