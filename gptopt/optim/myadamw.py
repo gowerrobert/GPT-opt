@@ -3,6 +3,19 @@ import math
 import warnings
 
 
+def name_by_param(named_params):
+    param_groups = list(named_params)
+    name_by_param = {}
+    if not isinstance(param_groups[0], dict):
+        param_groups = [{"params": param_groups}]
+    for group in param_groups:
+        for name, p in group["params"]:
+            if not p.requires_grad:
+                continue
+            name_by_param[p] = name
+    return name_by_param
+
+
 class MyAdamW(torch.optim.Optimizer):
     """AdamW that sees (name, param) and can treat attention Q/K specially.
 
@@ -17,13 +30,7 @@ class MyAdamW(torch.optim.Optimizer):
         eps=1e-8,
         weight_decay=0.01
     ):
-        params = []
-        self.name_by_param = {}
-        for name, p in named_params:
-            if not p.requires_grad:
-                continue
-            params.append(p)
-            self.name_by_param[p] = name
+        self.name_by_param = name_by_param(named_params)
 
         defaults = dict(
             lr=lr,
@@ -31,7 +38,7 @@ class MyAdamW(torch.optim.Optimizer):
             eps=eps,
             weight_decay=weight_decay
         )
-        super().__init__(params, defaults)
+        super().__init__(named_params, defaults)
 
     def _is_attn_qkv_weight(self, name: str) -> bool:
         return ("c_attn" in name) and name.endswith("weight")
