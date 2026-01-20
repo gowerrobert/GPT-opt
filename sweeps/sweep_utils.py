@@ -613,7 +613,8 @@ def plot_lr_sweep_over_models(
     ymargin=0.05,
     linewidth=3.0,
     alpha=0.8,
-    title=""
+    title="",
+    ylim=None
 ):
     """
     Plot a LR sweep from a DataFrame.
@@ -695,8 +696,12 @@ def plot_lr_sweep_over_models(
             y = y[np.isfinite(y)]
 
         if y.size:
-            ymin = float(np.min(y))
-            ymax = float(np.max(y))
+            if ylim is not None:
+                ymin, ymax = ylim
+            else:
+                ymin = float(np.min(y))
+                ymax = float(np.max(y))
+                
             if ylog:
                 pad = max(float(ymargin), 0.0)
                 ax.set_ylim(ymin / (10 ** pad), ymax * (10 ** pad))

@@ -125,14 +125,14 @@ def cvxpy_AB(G1, G2, A, B, beta, mu=0, verbose=False):
 
 
 
-def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg, 
-                    Z1_0=None, Z2_0=None, Y0=None,
-                    f_star=None, max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball,
+def compare_methods_fast_pdhg(prox_h_conj, h_conj, A_linop, Grad, beta, mu_reg, 
+                    Z0=None, Y0=None,
+                    f_star=None, max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball_linop,
                     eps_abs=1e-8, eps_rel=1e-8, versbose=False, theta=1):
 
-    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2) \
-                            + (mu_reg / 2) * ((Z1).pow(2).sum() + Z2.pow(2).sum())).item()  
-    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
+    func_obj = lambda Z: (Grad * Z).sum().item()  
+    func_constr_viol = lambda Z: max(torch.max(torch.abs(A_linop.mv(Z))).item() - beta, 0) / beta
+ 
 
     metrics = {} 
 
@@ -145,16 +145,12 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
     if mu_reg == 0:
         settings["ada rehpdhg"] = {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}
         settings["ada rehpdhg ds"] = {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": True}
-    residuals = {}
-    m = A.shape[0]
-    if Z1_0 is None: 
-        Z0 = None
-    else:
-        Z0 = torch.cat([Z1_0, Z2_0], dim=0) 
+    residuals = {} 
+
     if Z0 is not None and Y0 is not None:
         metrics["init"] = {
-                    "obj": func_obj(Z0[:m, :], Z0[m:, :]),
-                    "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])}
+                    "obj": func_obj(Z0),
+                    "viol": func_constr_viol(Z0)}
     # Torch prox for h* (uses prox_l1 from pdhg.py)
     prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
     h_conj = lambda y: beta * torch.abs(y).sum()
@@ -162,7 +158,7 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
     for setting in settings:
         # Run torch PDHG
         Z_t, res, _, _ = pdhg_kq_attn_layer(
-            prox_h_conj, A2=A, A1=B, G1=G1, G2=G2,
+            prox_h_conj, A_linop=A_linop, Grad=Grad,
             max_iter=max_iter, eps_abs=eps_abs, eps_rel=eps_rel,
             stopping=stopping, Y0=Y0, Z0=Z0,
             h_conj=h_conj, beta=beta, pd_residuals=pd_residuals,
@@ -175,19 +171,19 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
         )
         residuals[setting] = res  
         metrics[setting] = {
-                    "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
-                    "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
+                    "obj": func_obj(Z_t),
+                    "viol": func_constr_viol(Z_t),
     }  
 
     if mu_reg > 0:
         _, Z_t, res = fista_ls_l1_reg(
-                A2=A, A1=B, G1=G1, G2=G2,
+                A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_reg, max_iter=max_iter,
                 eps_abs=1e-6, eps_rel=1e-12, stopping=False,
-                Y0=Y0, pd_residuals=pd_residuals_max_ball
+                Y0=Y0, pd_residuals=pd_residuals
             )
         residuals["fista"] = res  
-        metrics["fista"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        metrics["fista"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
         
  
     header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"

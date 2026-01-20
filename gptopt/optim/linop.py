@@ -1,59 +1,10 @@
 import torch
-
+from torchmin.lstsq.linear_operator import TorchLinearOperator
 from typing import Optional, Callable, Literal, Any
 from torch._vmap_internals import _vmap 
 
 
 
-class TorchLinearOperator:
-    """
-    From https://github.com/rfeinman/pytorch-minimize/blob/main/torchmin/lstsq/linear_operator.py
-    """
-
-    def __init__(self, matvec, rmatvec, shape, fro_norm, device="cuda",
-                 **kwargs: Any):
-        self._matvec = matvec
-        self._rmatvec = rmatvec
-        self.shape = shape
-        self.fro_norm = fro_norm
-        self.device = device 
-
-        # extra attributes
-        if kwargs:
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    def matvec(self, x):
-        # Ax
-        return self._matvec(x)
-    
-    def rmatvec(self, y):
-        # A^* y
-        return self._rmatvec(y)
-
-
-    def matmat(self, X):
-        try:
-            return _vmap(self.matvec)(X.T).T
-        except:
-            return torch.hstack([self.matvec(col).view(-1,1) for col in X.T])
-
-    def transpose(self):
-        return type(self)(
-            matvec=self._rmatvec,
-            rmatvec=self._matvec,
-            shape=(self.shape[1], self.shape[0]),
-            fro_norm=self.fro_norm,
-            device=self.device,
-            **{k: v for k, v in self.__dict__.items()
-               if k not in {"_matvec", "_rmatvec", "shape", "fro_norm", "device"}}
-        )
-
-    mv = matvec
-    rmv = rmatvec
-    matmul = matmat
-    t = transpose
-    T = property(transpose) 
     
 
 def attn_linop_from_matrices(A1, A2):
@@ -62,8 +13,12 @@ def attn_linop_from_matrices(A1, A2):
     fro_norm = fro_norm_attn_linop(A1=A1, A2=A2)
     m, n = A1.shape
     A_linop = TorchLinearOperator(matvec=matvec, rmatvec=rmatvec, 
-                                    shape=(n**2, 2*m*n), fro_norm=fro_norm, 
-                                    device=A1.device, A1=A1, A2=A2, dtype=A1.dtype)
+                                    shape=(n**2, 2*m*n))
+    A_linop.fro_norm = fro_norm
+    A_linop.device = A1.device
+    A_linop.A1 = A1
+    A_linop.A2 = A2
+    A_linop.dtype = A1.dtype
     return A_linop
 
 

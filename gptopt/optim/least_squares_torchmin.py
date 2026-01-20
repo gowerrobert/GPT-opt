@@ -1,12 +1,12 @@
 import torch
-from torchmin.lstsq.linear_operator import TorchLinearOperator as TMLinearOperator
+from torchmin.lstsq.linear_operator import TorchLinearOperator 
 from torchmin.lstsq.lsmr import lsmr
 
 from .linop import *
 
 
 
-def solve_lsmr_Y_lstsq(A_linop, Grad):
+def solve_lsmr_Y_lstsq(A_linop, Grad, maxiter=1000):
     # Minimize $\|\mathcal{A}^*(Y) + G\|_F^2$
     n_sq, mn2 = A_linop.shape          # (n^2, 2mn)
     n = int(round(n_sq ** 0.5)) 
@@ -15,13 +15,13 @@ def solve_lsmr_Y_lstsq(A_linop, Grad):
 
     A_linop_vec = wrap_Astar_for_lsmr(A_linop)
     b_vec = pack_Z(-Grad, m, n)         
-    y_vec, itn = lsmr(A_linop_vec, b_vec)    
+    y_vec, itn = lsmr(A_linop_vec, b_vec, maxiter=maxiter)    
     Y_hat = unpack_Y(y_vec, n)
     res = torch.norm(A_linop.rmatvec(Y_hat) + Grad, p='fro')/torch.norm(Grad, p='fro')
     return Y_hat, res, itn
 
 
-def solve_lsmr_Z_lstsq(A_linop, beta, Y0):
+def solve_lsmr_Z_lstsq(A_linop, beta, Y0, maxiter=1000):
     # Minimize $\|\mathcal{A}(Z) +\beta \mathbf{sign}(Y^0)\|_F^2$
     n_sq, mn2 = A_linop.shape          # (n^2, 2mn)
     n = int(round(n_sq ** 0.5)) 
@@ -31,7 +31,7 @@ def solve_lsmr_Z_lstsq(A_linop, beta, Y0):
     A_linop_vec = wrap_A_for_lsmr(A_linop)
     S = torch.sign(Y0)
     b_vec = pack_Y(-beta * S, n)         
-    z_vec, itn = lsmr(A_linop_vec, b_vec)    
+    z_vec, itn = lsmr(A_linop_vec, b_vec, maxiter=maxiter)    
     Z_hat = unpack_Z(z_vec, m, n)
     res = torch.norm(A_linop.matvec(Z_hat) + beta * S, p='fro')/torch.norm(beta * S, p='fro')
     return Z_hat, res, itn
@@ -76,7 +76,7 @@ def wrap_Astar_for_lsmr(A_linop):
         Y = A_linop.matvec(Z)          # A(Z), shape (n, n)
         return pack_Y(Y, n)            # length n^2
 
-    return TMLinearOperator(shape=(2*m*n, n*n), matvec=mv, rmatvec=rmv)
+    return TorchLinearOperator(shape=(2*m*n, n*n), matvec=mv, rmatvec=rmv)
 
 
 def wrap_A_for_lsmr(A_linop):
@@ -96,4 +96,4 @@ def wrap_A_for_lsmr(A_linop):
         Y = A_linop.matvec(Z)          # A(Z), shape (n, n)
         return pack_Y(Y, n)            # length n^2
 
-    return TMLinearOperator(shape=(n*n, 2*m*n), matvec=mv, rmatvec=rmv)
+    return TorchLinearOperator(shape=(n*n, 2*m*n), matvec=mv, rmatvec=rmv)
