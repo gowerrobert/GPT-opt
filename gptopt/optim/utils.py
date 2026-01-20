@@ -283,6 +283,34 @@ def get_optimizer(opt_config: dict, lr = 1e-3) -> Tuple[torch.optim.Optimizer, d
                   'warm_start': opt_config.get('warm_start', False),
                   'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
                   } 
+    elif name == "attn_pd_adamw_warm_start":
+        opt_obj = AttnPDAdamW
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)), 
+                  'rho_over_lr': opt_config.get('rho_over_lr', 10),
+                  'attn_max_iter': opt_config.get('attn_max_iter', 100),
+                  'pd_type': opt_config.get('pd_type', 'pdhg'),
+                  'momentum': opt_config.get('momentum', False),
+                  'diag_scaling': opt_config.get('diag_scaling', False), 
+                  'attn_momentum': opt_config.get('attn_momentum', "none"),
+                  'warm_start': opt_config.get('warm_start', True),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
+                  } 
+    elif name == "attn_pd_adamw_warm_start_only":
+        opt_obj = AttnPDAdamW
+        hyperp = {'lr': lr,
+                  'weight_decay': opt_config.get('weight_decay', 0),
+                  'betas': opt_config.get('betas', (0.9, 0.999)), 
+                  'rho_over_lr': opt_config.get('rho_over_lr', 10),
+                  'attn_max_iter': opt_config.get('attn_max_iter', 100),
+                  'pd_type': opt_config.get('pd_type', 'pdhg'),
+                  'momentum': opt_config.get('momentum', False),
+                  'diag_scaling': opt_config.get('diag_scaling', False), 
+                  'attn_momentum': opt_config.get('attn_momentum', "none"),
+                  'warm_start': opt_config.get('warm_start', True),
+                  'lsqr_max_iter': opt_config.get('lsqr_max_iter', 100)
+                  } 
     elif name == "attn_rehpdhg_adamw":
         opt_obj = AttnPDAdamW
         hyperp = {'lr': lr,

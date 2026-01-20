@@ -3,7 +3,7 @@ import torch
 from torch.optim import Optimizer
 import numpy as np
 from typing import Optional, Callable, Literal, Any
-from .least_squares import Y_dual_feasible, attn_least_squares_solve
+from .least_squares_torchmin import solve_lsmr_Y_lstsq, solve_lsmr_Z_lstsq
 
 from .fast_pdhg import *
 from .fista import *
@@ -223,30 +223,26 @@ class AttnPDAdamW(Optimizer):
         prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
         h_conj = lambda y: beta * torch.abs(y).sum()
         
-        if group["warm_start"] or attn_max_iter == 0:
-            Y0, _ = Y_dual_feasible(A1=A1, A2=A2, G1=G1, G2=G2, method="lsqr", maxit=lsqr_max_iter) 
+        if group["warm_start"] or attn_max_iter == 0: 
+            Y0, res_lsmr_y, itn_y = solve_lsmr_Y_lstsq(A_linop, Grad, maxiter=lsqr_max_iter)
             if pd_type != "fista" or attn_max_iter == 0:
-                (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
-                                                    X_type="Z", Y0=Y0, beta=beta, 
-                                                    tol=1e-10, maxit=lsqr_max_iter, diag_scaling=True)
+                Z0, res_lsmr_z, itn_z = solve_lsmr_Z_lstsq(A_linop, beta, Y0, maxiter=lsqr_max_iter)
+                r1, r1_rel, r2, r2_rel = pd_residuals_max_ball_linop(A_linop, Y0, Z0, Grad, beta, mu_reg)
         else:
-            Y0, Z1_0, Z2_0 = None, None, None
+            Y0, Z0 = None, None
 
         if attn_max_iter == 0: # use values directly from LSQR 
-            Z1_t, Z2_t = Z1_0, Z2_0
-            residuals = res
+            Z1_t, Z2_t = Z0[:n_embed], Z0[n_embed:]
             r1, r1_rel, r2, r2_rel = pd_residuals_max_ball_linop(
                 A_linop=A_linop, Y=Y0, Z=Z0, Grad=Grad, beta=beta, mu=mu_reg)
             residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel], 
-                            'z_norm': [ (Z1_t.pow(2).sum() + Z2_t.pow(2).sum()).sqrt().item() ], 
-                            'y_norm': [ Y0.pow(2).sum().sqrt().item() ] }
-            norm_Y = Y0.pow(2).sum().sqrt().item()
+                         'r_rel':[max(r1_rel, r2_rel)],
+                            'z_norm': [ torch.norm(Z0, p='fro').item() ], 
+                            'y_norm': [ torch.norm(Y0, p='fro').item() ] }
+            norm_Y = residuals["y_norm"][-1]
 
-        elif pd_type == "pdhg": 
-            # Z1_0=-G1; Z2_0=-G2 
-            # Run PDHG  
-            if Z1_0 is not None: Z0 = torch.cat([Z1_0, Z2_0], dim=0)
-            else: Z0 = None 
+        elif pd_type == "pdhg":  
+            # Run PDHG   
             Z_t, residuals, norm_Y, _ = pdhg_kq_attn_layer(prox_h_conj,
                                         A_linop=A_linop, Grad=Grad,
                                         max_iter=attn_max_iter, lamb_max=lamb_max, beta=beta,
@@ -260,7 +256,7 @@ class AttnPDAdamW(Optimizer):
         elif pd_type == "fista":
             # Run FISTA
             # mu < mu_max = \|A(G)\|_\max / \beta
-            mu_max = mathcal_A_linop_base(A1=A1, A2=A2, Z1=G1, Z2=G2).abs().max().item() / beta
+            mu_max = (A_linop.matvec(Grad)).abs().max().item() / beta 
             mu_reg = max(group["mu_frac"] * mu_max, 1e-6)
             Y_fista, Z_t, residuals = fista_ls_l1_reg(
                 A_linop=A_linop, Grad=Grad,
@@ -270,7 +266,7 @@ class AttnPDAdamW(Optimizer):
                 Y0=Y0, pd_residuals=pd_residuals_max_ball_linop
             )
             Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
-            norm_Y = Y_fista.pow(2).sum().sqrt().item() 
+            norm_Y = torch.norm(Y_fista, p='fro').item() 
 
         residuals["G1_norm"] = G1.norm().item()
         residuals["G2_norm"] = G2.norm().item()

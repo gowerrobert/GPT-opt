@@ -7,10 +7,10 @@ optimizer_params:
   warm_up_fraction: 0.4
   rho_over_lr: 1
   attn_max_iter: 0
-  lsqr_max_iter: 500
+  lsqr_max_iter: 200
   momentum: false 
   attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
-  diag_scaling: true  
+  diag_scaling: false  
   warm_start: true
   enable_restart: false
   reflected_halpern: false
