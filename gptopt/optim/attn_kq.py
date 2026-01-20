@@ -9,6 +9,7 @@ from .fast_pdhg import *
 from .fista import *
 from .attn_utils import *
 from .linop import *
+from .utils import name_by_param
 
 
 
@@ -38,13 +39,7 @@ class AttnPDAdamW(Optimizer):
         mu_frac: float = 0.1, # fraction of mu_max, mu = mu_frac * mu_max
         bias_correction: bool = True
     ):
-        params = []
-        self.name_by_param = {}
-        for name, p in named_params:
-            if not p.requires_grad:
-                continue
-            params.append(p)
-            self.name_by_param[p] = name
+        params, self.name_by_param = name_by_param(named_params)
 
         defaults = dict(
             lr=lr,

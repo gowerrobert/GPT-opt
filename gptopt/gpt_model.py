@@ -79,6 +79,7 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         assert self.head_dim % 2 == 0, "RoPE requires even head_dim"
         self.rope = RotaryEmbedding(self.head_dim, base=10000.0)
+        self.use_muP_scaling = (config.enable_mup_with_base_n_embd is not None)
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -93,16 +94,18 @@ class CausalSelfAttention(nn.Module):
         cos, sin = self.rope.get_embed(T, x.device, x.dtype)
         q = apply_rotary_pos_emb(q, cos, sin)
         k = apply_rotary_pos_emb(k, cos, sin)
+        # Adapted from https://github.com/EleutherAI/nanoGPT-mup/blob/bcadbc3c7a44138525eca8a799764afba7dca2b3/model.py#L65
+        attn_scale = (1. / k.size(-1)) if self.use_muP_scaling else (1. / math.sqrt(k.size(-1)))
 
         if self.flash_attention:
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=attn_scale)
         else:
             # manual implementation of attention
             if self.kq_layernorm:
                 q = self.ln_q(q)
                 k = self.ln_k(k)
             # this materializes the large (T,T) matrix for all the queries and keys
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = (q @ k.transpose(-2, -1)) * attn_scale
             if self.kq_logit_softcap is not None:
                 att = self.kq_logit_softcap * torch.tanh(att / self.kq_logit_softcap)
             # causal mask
@@ -199,6 +202,7 @@ class GPTConfig:
     kq_layernorm: bool = False
     kq_logit_softcap: float = None # 50
     kq_weight_clip: float = None # 100
+    enable_mup_with_base_n_embd: int | None = None
 
 
 @dataclass
@@ -225,14 +229,22 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights, use a torch rng object to be very careful
+        self.init_std = 0.02
+        self.mup_width_multiplier = config.n_embd / config.enable_mup_with_base_n_embd if config.enable_mup_with_base_n_embd is not None else 1.0
         self.init_rng = torch.Generator(device="cpu") #self.device)
         self.init_rng.manual_seed(42)
         self.apply(self._init_weights)
+        # Adapting below from https://github.com/EleutherAI/nanoGPT-mup/blob/bcadbc3c7a44138525eca8a799764afba7dca2b3/model.py#L163-L169
+        # variance of hidden layers should go as 1/n_embd
+        with torch.no_grad():
+            for pn, p in self.named_parameters():
+                if any(pn.endswith(end) for end in ('c_fc.weight', 'c_proj.weight', 'c_attn.weight', 'c_gate.weight')): 
+                    p.div_(math.sqrt(self.mup_width_multiplier))
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             # apply special scaled init to the residual projections, per GPT-2 paper
-            std = 0.02 if not hasattr(module, 'LLMC_RESIDUAL_SCALE_FLAG') else 0.02/math.sqrt(2 * self.config.n_layer)
+            std = self.init_std if not hasattr(module, 'LLMC_RESIDUAL_SCALE_FLAG') else self.init_std/math.sqrt(2 * self.config.n_layer)
             # we want to skip initializing lm_head, which shares parameters with wte
             # and wte was already initialized down below during the Embedding init
             if not hasattr(module, 'LLMC_SKIP_INIT'):
@@ -240,7 +252,7 @@ class GPT(nn.Module):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=self.init_rng)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=self.init_std, generator=self.init_rng)
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -257,6 +269,8 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+        # Adapting from https://github.com/EleutherAI/nanoGPT-mup/blob/bcadbc3c7a44138525eca8a799764afba7dca2b3/model.py#L219
+        x /= self.mup_width_multiplier
         logits = self.lm_head(x)
 
         loss = None

@@ -1,6 +1,7 @@
 import torch
 import math
 import warnings
+from .utils import name_by_param
 
 
 class MyAdamW(torch.optim.Optimizer):
@@ -17,13 +18,7 @@ class MyAdamW(torch.optim.Optimizer):
         eps=1e-8,
         weight_decay=0.01
     ):
-        params = []
-        self.name_by_param = {}
-        for name, p in named_params:
-            if not p.requires_grad:
-                continue
-            params.append(p)
-            self.name_by_param[p] = name
+        params, self.name_by_param = name_by_param(named_params)
 
         defaults = dict(
             lr=lr,
