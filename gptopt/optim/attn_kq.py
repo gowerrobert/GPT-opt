@@ -3,12 +3,25 @@ import torch
 from torch.optim import Optimizer
 import numpy as np
 from typing import Optional, Callable, Literal, Any
+
 from .least_squares import Y_dual_feasible, attn_least_squares_solve
 
 from .fast_pdhg import *
 from .fista import *
 from .attn_utils import *
 
+
+def name_by_param(named_params):
+    param_groups = list(named_params)
+    name_by_param = {}
+    if not isinstance(param_groups[0], dict):
+        param_groups = [{"params": param_groups}]
+    for group in param_groups:
+        for name, p in group["params"]:
+            if not p.requires_grad:
+                continue
+            name_by_param[p] = name
+    return name_by_param
 
 
 class AttnPDAdamW(Optimizer):
@@ -37,13 +50,7 @@ class AttnPDAdamW(Optimizer):
         mu_frac: float = 0.1, # fraction of mu_max, mu = mu_frac * mu_max
         bias_correction: bool = True
     ):
-        params = []
-        self.name_by_param = {}
-        for name, p in named_params:
-            if not p.requires_grad:
-                continue
-            params.append(p)
-            self.name_by_param[p] = name
+        self.name_by_param = name_by_param(named_params)
 
         defaults = dict(
             lr=lr,
@@ -68,7 +75,7 @@ class AttnPDAdamW(Optimizer):
             f"{rho_over_lr=}, {attn_max_iter=}, {warm_start=}, {lsqr_max_iter=}"
             f"{attn_momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
         )
-        super().__init__(params, defaults)
+        super().__init__(named_params, defaults)
 
     def _is_attn_qkv_weight(self, name: str) -> bool:
         return ("c_attn" in name) and name.endswith("weight")
