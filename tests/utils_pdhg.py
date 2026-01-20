@@ -1,14 +1,14 @@
 import cvxpy as cp
 import numpy as np
 import matplotlib.pyplot as plt
+from sympy import beta
 import torch
 import contextlib, json, time
 from glob import glob
 import pandas as pd
 
 from gptopt.optim.fast_pdhg import pdhg_kq_attn_layer
-from gptopt.optim.nesterov import nesterov_lmax_moreau
-from gptopt.optim.attn_kq import prox_l1, fista_ls_l1_reg, AttnPDAdamW, pd_residuals_infty_ball
+from gptopt.optim.nesterov import nesterov_lmax_moreau 
 from gptopt.optim.myadamw import MyAdamW
 from gptopt.train import Logging, eval_validation_loss
 from gptopt.gpt_model import CausalSelfAttention
@@ -30,6 +30,7 @@ from omegaconf import DictConfig, OmegaConf
 from gptopt.optim.attn_kq import *
 from gptopt.optim.attn_utils import *
 from gptopt.optim.fast_pdhg import *
+from gptopt.optim.fista import fista_ls_l1_reg
 
 
 
@@ -199,72 +200,74 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A, B, G1, G2, beta, mu_reg,
     return residuals
 
 
-def compare_methods_fista_nesterov(A, B, G1, G2, beta, mu_reg, mu_moreau,
-                    Z1_0=None, Z2_0=None, Y0=None,
-                    max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball,
+def compare_methods_fista_nesterov(A_linop, Grad, beta, mu_reg, mu_moreau,
+                    Z0=None, Y0=None, func_obj=None, func_constr_viol=None,
+                    max_iter=1000, stopping=True, pd_residuals=pd_residuals_max_ball_linop,
                     eps_abs=1e-8, eps_rel=1e-8):
-
-    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()  
-    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
 
     metrics = {} 
 
+    if func_obj is None:
+        func_obj = lambda Z: (Grad * Z).sum().item()  
+        func_constr_viol = lambda Z: max(torch.max(torch.abs(A_linop.mv(Z))).item() - beta, 0) / beta
+
     residuals = {}
-    m = A.shape[0]
-    if Z1_0 is None: 
-        Z0 = None
-    else:
-        Z0 = torch.cat([Z1_0, Z2_0], dim=0) 
+    n_sq, mn2 = A_linop.shape # (n**2, 2*m*n)
+    n = int(n_sq ** 0.5)
+    m = mn2 // (2 * n)
+    if Z0 is None: 
+        Z0 = None 
+
     if Z0 is not None and Y0 is not None:
         metrics["init"] = {
-                    "obj": func_obj(Z0[:m, :], Z0[m:, :]),
-                    "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])}
+                    "obj": func_obj(Z0),
+                    "viol": func_constr_viol(Z0)}
 
     _, Z_t, res = fista_ls_l1_reg(
-            A2=A, A1=B, G1=G1, G2=G2,
+            A_linop=A_linop, Grad=Grad,
             beta=beta, mu=mu_reg, max_iter=max_iter,
             eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
             Y0=Y0, pd_residuals=pd_residuals
         )
     residuals["fista"] = res  
-    metrics["fista"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
-        
-    G12 = torch.cat([G1, G2], dim=0)
-    AG_max = mathcal_A_linop(A1=B, A2=B, Z=G12).abs().max().item()
-    Z0 = - (beta * 1.2 / AG_max) * G12
+    metrics["fista"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
+         
+
+    AG_max = A_linop.mv(Grad).abs().max().item()
+    Z0 = - (beta * 1.2 / AG_max) * Grad
     Z_t, res = nesterov_lmax_moreau(
-                A2=A, A1=B, G1=G1, G2=G2,
+                A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 pd_residuals=pd_residuals
             )
     residuals["nesterov G init"] = res  
-    metrics["nesterov G init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+    metrics["nesterov G init"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
       
-    Z0 = torch.randn(2 * G1.shape[0], G1.shape[1], device=G1.device, dtype=G1.dtype)
-    AZ_max = mathcal_A_linop(A1=B, A2=B, Z=Z0).abs().max().item()
+    Z0 = torch.randn_like(Grad)
+    AZ_max = A_linop.mv(Z0).abs().max().item()
     Z0 = (beta * 1.2 / AZ_max) * Z0
     Z_t, res = nesterov_lmax_moreau(
-                A2=A, A1=B, G1=G1, G2=G2,
+                A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 pd_residuals=pd_residuals
             )
     residuals["nesterov rand init"] = res  
-    metrics["nesterov rand init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+    metrics["nesterov rand init"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
       
     Z0 = None
     Z_t, res = nesterov_lmax_moreau(
-                A2=A, A1=B, G1=G1, G2=G2,
+                A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
                 eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
                 pd_residuals=pd_residuals
             )
     residuals["nesterov zero init"] = res  
-    metrics["nesterov zero init"] = { "obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+    metrics["nesterov zero init"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
       
 
     header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12}"
@@ -274,154 +277,108 @@ def compare_methods_fista_nesterov(A, B, G1, G2, beta, mu_reg, mu_moreau,
         m = metrics[method]
         print(f"{method:<12}  {m['obj']:>12.6e}  {m['viol']:>12.6e}")
 
-    return residuals
+    return residuals, metrics
 
 
-def compare_methods_fista_nesterov_mu(A, B, G1, G2, beta, mu_range_fista,
-                                      mu_range_nesterov,
-                    Z1_0=None, Z2_0=None, Y0=None,
-                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball,
+def compare_methods_fista_nesterov_mu(A_linop, Grad, beta, mu_range_fista,
+                                      mu_range_nesterov, Z0=None, Y0=None,
+                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball_linop,
                     eps_abs=1e-8, eps_rel=1e-8):
 
-    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()
-    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
-    mu_max = (G1.t() @ B + A.t() @ G2).abs().max().item() / beta
-
-    metrics = {}
-    m = A.shape[0]
+    func_obj = lambda Z: (Grad * Z).sum().item()  
+    func_constr_viol = lambda Z: max(torch.max(torch.abs(A_linop.mv(Z))).item() - beta, 0) / beta
+    mu_max = (A_linop.matvec(Grad)).abs().max().item() / beta
+ 
+    n_sq, mn2 = A_linop.shape # (n**2, 2*m*n)
+    n = int(n_sq ** 0.5)
+    m = mn2 // (2 * n)
 
     # rows for residual dataframe
     rows = []
 
-    if Z1_0 is not None and Z2_0 is not None:
-        Z0 = torch.cat([Z1_0, Z2_0], dim=0)
-    else:
-        Z0 = None
-
-    if Z0 is not None and Y0 is not None:
-        metrics["init"] = {
-            "obj": func_obj(Z0[:m, :], Z0[m:, :]),
-            "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])
-        }
  
     for mu_scale in mu_range_fista:
-        mu = mu_scale * mu_max
-        metrics[mu_scale] = {}
+        mu = mu_scale * mu_max 
 
         # --- FISTA ---
         _, Z_t, res = fista_ls_l1_reg(
-            A2=A, A1=B, G1=G1, G2=G2,
+            A_linop=A_linop, Grad=Grad,
             beta=beta, mu=mu, max_iter=max_iter,
             eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
             Y0=Y0, pd_residuals=pd_residuals
         ) 
-        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
-        metrics[mu_scale]["fista"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1],
+                     "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}) 
+
+    AG_max = A_linop.matvec(Grad).abs().max().item()
+    Z0_G_init = - (beta * 1.2 / AG_max) * Grad
+    Z0n = torch.randn_like(Grad, device=Grad.device, dtype=Grad.dtype)
+    AZ_max = A_linop.matvec(Z0n).abs().max().item()
+    Z0_rand_init = (beta * 1.2 / AZ_max) * Z0n
+
+    settings = {"nesterov G init": Z0_G_init,
+                "nesterov rand init": Z0_rand_init,
+                "nesterov zero init": None}
 
     for mu_scale in mu_range_nesterov:
-        mu = mu_scale * mu_max
-        if mu_scale not in metrics:
-            metrics[mu_scale] = {}
+        mu = mu_scale * mu_max 
         
-        # --- Nesterov (G init) ---
-        G12 = torch.cat([G1, G2], dim=0)
-        AG_max = mathcal_A_linop(A1=B, A2=B, Z=G12).abs().max().item()
-        Z0n = - (beta * 1.2 / AG_max) * G12
-        Z_t, res = nesterov_lmax_moreau(
-            A2=A, A1=B, G1=G1, G2=G2,
-            beta=beta, mu=mu,
-            max_iter=max_iter, Z0=Z0n,
-            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
-            pd_residuals=pd_residuals
-        ) 
-        rows.append({"model": "nesterov G init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
-        metrics[mu_scale]["nesterov G init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
-
-        # --- Nesterov (rand init) ---
-        Z0n = torch.randn(2 * G1.shape[0], G1.shape[1], device=G1.device, dtype=G1.dtype)
-        AZ_max = mathcal_A_linop(A1=B, A2=B, Z=Z0n).abs().max().item()
-        Z0n = (beta * 1.2 / AZ_max) * Z0n
-        Z_t, res = nesterov_lmax_moreau(
-            A2=A, A1=B, G1=G1, G2=G2, beta=beta, mu=mu, max_iter=max_iter, Z0=Z0n, eps_abs=eps_abs, 
-            eps_rel=eps_rel, stopping=stopping, pd_residuals=pd_residuals
-        )
-        rows.append({"model": "nesterov rand init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
-        metrics[mu_scale]["nesterov rand init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
-
-        # --- Nesterov (zero init) ---
-        Z_t, res = nesterov_lmax_moreau(
-            A2=A, A1=B, G1=G1, G2=G2, beta=beta, mu=mu, max_iter=max_iter, Z0=None,
-            eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping, pd_residuals=pd_residuals
-        )
-        rows.append({"model": "nesterov zero init", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
-        metrics[mu_scale]["nesterov zero init"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        for method, Z0_method in settings.items():
+            Z_t, res = nesterov_lmax_moreau(
+                A_linop=A_linop, Grad=Grad,
+                beta=beta, mu=mu,
+                max_iter=max_iter, Z0=Z0_method,
+                eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
+                pd_residuals=pd_residuals
+            ) 
+            rows.append({"model": method, "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1],
+                         "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}) 
 
     df_residuals = (pd.DataFrame(rows)
                       .sort_values(["model", "mu"])
                       .reset_index(drop=True))
-    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12} {'Mu':>12}"
-    print(header)
-    print("-" * len(header))
-    for mu in metrics.keys():
-        for method in metrics[mu].keys(): 
-            m = metrics[mu][method]
-            print(f"{method:<20}  {m['obj']:>12.6e}  {m['viol']:>12.6e}  {mu:>.4e}")
     return df_residuals
 
 
-def compare_methods_fista_pdhg_mu(A, B, G1, G2, beta, mu_range_fista,
+def compare_methods_fista_pdhg_mu(A_linop, Grad, beta, mu_range_fista,
                     mu_range_pdhg,
-                    Z1_0=None, Z2_0=None, Y0=None,
-                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball,
+                    Z0=None, Y0=None,
+                    max_iter=20, stopping=False, pd_residuals=pd_residuals_max_ball_linop,
                     eps_abs=1e-8, eps_rel=1e-8):
 
-    func_obj = lambda Z1, Z2: (torch.trace(G1.T @ Z1) + torch.trace(G2.T @ Z2)).item()
-    func_constr_viol = lambda Z1, Z2: max(torch.max(torch.abs(Z1.T @ B + A.T @ Z2)).item() - beta, 0) / beta
-    mu_max = (G1.t() @ B + A.t() @ G2).abs().max().item() / beta
-
-    metrics = {}
-    m = A.shape[0]
+    func_obj = lambda Z: (Grad * Z).sum().item()  
+    func_constr_viol = lambda Z: max(torch.max(torch.abs(A_linop.mv(Z))).item() - beta, 0) / beta
+    mu_max = (A_linop.matvec(Grad)).abs().max().item() / beta
+ 
+    n_sq, mn2 = A_linop.shape # (n**2, 2*m*n)
+    n = int(n_sq ** 0.5)
+    m = mn2 // (2 * n)
 
     # rows for residual dataframe
     rows = []
-
-    if Z1_0 is not None and Z2_0 is not None:
-        Z0 = torch.cat([Z1_0, Z2_0], dim=0)
-    else:
-        Z0 = None
-
-    if Z0 is not None and Y0 is not None:
-        metrics["init"] = {
-            "obj": func_obj(Z0[:m, :], Z0[m:, :]),
-            "viol": func_constr_viol(Z0[:m, :], Z0[m:, :])
-        }
 
     settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
              "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False}, 
            "ada rehpdhg":{"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}}
     
- 
     for mu_scale in mu_range_fista:
-        mu = mu_scale * mu_max
-        metrics[mu_scale] = {}
+        mu = mu_scale * mu_max 
 
         # --- FISTA ---
         _, Z_t, res = fista_ls_l1_reg(
-            A2=A, A1=B, G1=G1, G2=G2,
+            A_linop=A_linop, Grad=Grad,
             beta=beta, mu=mu, max_iter=max_iter,
             eps_abs=eps_abs, eps_rel=eps_rel, stopping=stopping,
             Y0=Y0, pd_residuals=pd_residuals
         ) 
-        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]})
-        metrics[mu_scale]["fista"] = {"obj": func_obj(Z_t[:m, :], Z_t[m:, :]), "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :])}
+        rows.append({"model": "fista", "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1],
+                     "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)})
 
     prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
     h_conj = lambda y: beta * torch.abs(y).sum()
 
     for mu_scale in mu_range_pdhg:
-        mu = mu_scale * mu_max
-        if mu_scale not in metrics:
-            metrics[mu_scale] = {}
+        mu = mu_scale * mu_max 
         
         for setting in settings:
             if mu > 0 and "ada" in setting: 
@@ -429,7 +386,7 @@ def compare_methods_fista_pdhg_mu(A, B, G1, G2, beta, mu_range_fista,
                 continue
             # Run torch PDHG
             Z_t, res, _, _ = pdhg_kq_attn_layer(
-                prox_h_conj, A2=A, A1=B, G1=G1, G2=G2,
+                prox_h_conj, A_linop=A_linop, Grad=Grad,
                 max_iter=max_iter, eps_abs=eps_abs, eps_rel=eps_rel,
                 stopping=stopping, Y0=Y0, Z0=Z0,
                 h_conj=h_conj, beta=beta, pd_residuals=pd_residuals, mu=mu,
@@ -439,22 +396,14 @@ def compare_methods_fista_pdhg_mu(A, B, G1, G2, beta, mu_range_fista,
                 enable_restart=settings[setting]["enable_restart"],
                 verbose=False
             )
-            rows.append({"model": setting, "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1]}) 
-            metrics[mu_scale][setting] = {
-                        "obj": func_obj(Z_t[:m, :], Z_t[m:, :]),
-                        "viol": func_constr_viol(Z_t[:m, :], Z_t[m:, :]),
-    } 
+            rows.append({"model": setting, "mu": mu_scale, "r_true_res": res["r_true_res"][-1], "r_res": res["r_rel"][-1],
+                        "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)})
+
 
     df_residuals = (pd.DataFrame(rows)
                       .sort_values(["model", "mu"])
                       .reset_index(drop=True))
-    header = f"{'Method':<12}  {'Obj':>12}  {'Viol':>12} {'Mu':>12}"
-    print(header)
-    print("-" * len(header))
-    for mu in metrics.keys():
-        for method in metrics[mu].keys(): 
-            m = metrics[mu][method]
-            print(f"{method:<20}  {m['obj']:>12.6e}  {m['viol']:>12.6e}  {mu:>.4e}")
+
     return df_residuals
 
 

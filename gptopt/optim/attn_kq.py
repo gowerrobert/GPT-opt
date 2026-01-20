@@ -8,6 +8,7 @@ from .least_squares import Y_dual_feasible, attn_least_squares_solve
 from .fast_pdhg import *
 from .fista import *
 from .attn_utils import *
+from .linop import *
 
 
 
@@ -206,35 +207,36 @@ class AttnPDAdamW(Optimizer):
         assert p.shape[0] == 3 * n_embed
         # A1=W_q, A2=W_k, G1=G_k, G2=G_q
         A1, G2   = p[:n_embed, :],                  g[:n_embed, :]
-        A2, G1   = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :] 
+        A2, G1   = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
+        assert A1.shape == G2.shape and A2.shape == G1.shape 
 
-        nA = A2.pow(2).sum().sqrt().item()
-        nB = A1.pow(2).sum().sqrt().item()
+        A_linop = attn_linop_from_matrices(A1, A2)
+        
+        Grad = torch.cat([G1, G2], dim=0)
+
         # upper bound on the operator norm of mathcal{A}
-        lamb_max = (nA * nA + nB * nB) ** 0.5 
+        lamb_max = A_linop.fro_norm
         mu_reg = 0 
         beta = group["rho_over_lr"] * group["lr"]
 
         # Update key-query weights via PDHG or FISTA
         prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)
         h_conj = lambda y: beta * torch.abs(y).sum()
-        assert A1.shape == G2.shape and A2.shape == G1.shape
-
+        
         if group["warm_start"] or attn_max_iter == 0:
             Y0, _ = Y_dual_feasible(A1=A1, A2=A2, G1=G1, G2=G2, method="lsqr", maxit=lsqr_max_iter) 
             if pd_type != "fista" or attn_max_iter == 0:
                 (Z1_0, Z2_0), res = attn_least_squares_solve(A1=A1, A2=A2, G1=G1, G2=G2, 
                                                     X_type="Z", Y0=Y0, beta=beta, 
-                                tol=1e-10, maxit=lsqr_max_iter, diag_scaling=True)
+                                                    tol=1e-10, maxit=lsqr_max_iter, diag_scaling=True)
         else:
             Y0, Z1_0, Z2_0 = None, None, None
 
         if attn_max_iter == 0: # use values directly from LSQR 
             Z1_t, Z2_t = Z1_0, Z2_0
             residuals = res
-            r1, r1_rel, r2, r2_rel = pd_residuals_infty_ball(
-                A=A2, B=A1, Y=Y0, Z1=Z1_t, Z2=Z2_t, G1=G1, G2=G2,
-                beta=beta, mu=mu_reg)
+            r1, r1_rel, r2, r2_rel = pd_residuals_max_ball_linop(
+                A_linop=A_linop, Y=Y0, Z=Z0, Grad=Grad, beta=beta, mu=mu_reg)
             residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel], 
                             'z_norm': [ (Z1_t.pow(2).sum() + Z2_t.pow(2).sum()).sqrt().item() ], 
                             'y_norm': [ Y0.pow(2).sum().sqrt().item() ] }
@@ -246,11 +248,11 @@ class AttnPDAdamW(Optimizer):
             if Z1_0 is not None: Z0 = torch.cat([Z1_0, Z2_0], dim=0)
             else: Z0 = None 
             Z_t, residuals, norm_Y, _ = pdhg_kq_attn_layer(prox_h_conj,
-                                        A2=A2, A1=A1, G1=G1, G2=G2,
+                                        A_linop=A_linop, Grad=Grad,
                                         max_iter=attn_max_iter, lamb_max=lamb_max, beta=beta,
                                         mu=mu_reg, eps_abs=1e-6, eps_rel=1e-12, stopping=False, 
                                         Z0=Z0, Y0=Y0, diag_scaling=group["diag_scaling"], 
-                                        h_conj=h_conj, pd_residuals=pd_residuals_max_ball,
+                                        h_conj=h_conj, pd_residuals=pd_residuals_max_ball_linop,
                                         reflected_halpern=group["reflected_halpern"], 
                                         enable_restart=group["enable_restart"])
             Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
@@ -261,11 +263,11 @@ class AttnPDAdamW(Optimizer):
             mu_max = mathcal_A_linop_base(A1=A1, A2=A2, Z1=G1, Z2=G2).abs().max().item() / beta
             mu_reg = max(group["mu_frac"] * mu_max, 1e-6)
             Y_fista, Z_t, residuals = fista_ls_l1_reg(
-                A2=A2, A1=A1, G1=G1, G2=G2,
+                A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_reg, 
                 lamb_max=lamb_max, max_iter=attn_max_iter,
                 eps_abs=1e-6, eps_rel=1e-12, stopping=False,
-                Y0=Y0, pd_residuals=pd_residuals_max_ball
+                Y0=Y0, pd_residuals=pd_residuals_max_ball_linop
             )
             Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
             norm_Y = Y_fista.pow(2).sum().sqrt().item() 

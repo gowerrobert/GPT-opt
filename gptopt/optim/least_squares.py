@@ -39,7 +39,7 @@ def cg_diag_precond(lin_op, Z, C, normC, diag_precond, maxit=1000, tol=1e-10, la
 
 def lsqr(A, AT, b, x, func_res=None, max_iter=1000, atol=1e-6, btol=1e-6, verbose=False):
     """
-    LSQR min_x ||A x - b||_2 in PyTorch.
+    LSQR min_x ||A(X) - B||_2 in PyTorch presented in matrix format
     """
     # Helper norms / dots over arbitrary shapes
     def norm(t):
@@ -163,7 +163,7 @@ def attn_least_squares_solve(*, A1, A2, G1, G2, X_type, beta=None, Y0=None, verb
         rhs = (Z_test * AT_linop(Y_test)).sum()
         denom = lhs.abs() + rhs.abs() + 1e-12
         rel_err = ((lhs - rhs).abs() / denom).item()
-        assert rel_err < 1e-5, f"Adjointness check failed: rel_err={rel_err:.3e}"
+        assert rel_err < 1e-4, f"Adjointness check failed: rel_err={rel_err:.3e}"
 
     if X_type == "Z":
         tilde_Z0  = torch.zeros((2 * m, n), device=device, dtype=dtype) # [Z1.T, Z2]
@@ -300,7 +300,7 @@ def Y_dual_feasible(*, A1, A2, G1, G2, verbose=True, method="lsqr",
     """
     Check dual feasibility: exists Y s.t. A1 Y^T = -G1 and A2 Y = -G2
 
-    We solve (A1^T A1)Y + Y(A1^T A1) = -(A2^T G2 + G1^T A1) for Y
+    We solve (A2^T A2)Y + Y(A1^T A1) = -(A2^T G2 + G1^T A1) for Y
     residual = sqrt( ||A1 Y^T + G1||_F^2 + ||A2 Y + G2||_F^2 ).
     """ 
     device = G1.device

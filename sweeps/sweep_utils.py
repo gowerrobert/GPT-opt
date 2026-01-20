@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.ticker import ScalarFormatter, LogLocator, LogFormatterMathtext
+
 
 
 _RUNHYDRA_VAR_RE = re.compile(r"\$(\w+)|\$\{(\w+)\}")
@@ -406,6 +408,198 @@ def load_sweep_jsons_all(d_conf):
                 print(" ", name)
 
     return pd.DataFrame(rows), missing_by_model
+
+
+
+def plot_obj_viol_sweep_over_models(
+    df: pd.DataFrame,
+    *,
+    method_col="model",
+    xcol="mu",
+    obj_col="obj",
+    viol_col="viol",
+    colormap="husl",
+    outfilename=None,
+    xlog=True,
+    margin=0.05,
+    linewidth=3.0,
+    alpha=0.85,
+    title="",
+    legend_gap=0.12,
+    right_space=0.72,
+    figsize=(8.0, 4.2),
+    obj_shift="none",     # "none" | "min"
+    obj_ylog=False,
+    obj_floor=None,
+    # --- NEW ---
+    obj_ylim=None,        # None or (ymin, ymax) in *plotted* objective coords
+):
+    for c in [method_col, xcol, obj_col, viol_col]:
+        if c not in df.columns:
+            raise KeyError(f"Missing column: {c}")
+
+    # floor for log(viol): keep lines even if viol hits 0
+    v = pd.to_numeric(df[viol_col], errors="coerce").to_numpy()
+    v = v[np.isfinite(v) & (v > 0)]
+    viol_floor = float(v.min() * 0.5) if v.size else 1e-12
+    viol_floor = max(viol_floor, 1e-300)
+
+    if obj_shift not in ("none", "min"):
+        raise ValueError(f"obj_shift must be 'none' or 'min', got {obj_shift!r}")
+
+    # precompute objective shift (global min over plotted points)
+    df_obj = df[[xcol, obj_col]].copy()
+    df_obj[xcol] = pd.to_numeric(df_obj[xcol], errors="coerce")
+    df_obj[obj_col] = pd.to_numeric(df_obj[obj_col], errors="coerce")
+    df_obj = df_obj.dropna(subset=[xcol, obj_col])
+    if xlog:
+        df_obj = df_obj[df_obj[xcol] > 0]
+
+    obj_shift_val = 0.0
+    if obj_shift == "min" and not df_obj.empty:
+        obj_shift_val = float(df_obj[obj_col].to_numpy().min())
+
+    # floor for log(obj) after shift
+    obj_floor_val = None
+    if obj_ylog:
+        vals = df_obj[obj_col].to_numpy()
+        vals = vals[np.isfinite(vals)]
+        vals = vals - obj_shift_val
+        vals = vals[vals > 0]
+        if obj_floor is not None:
+            obj_floor_val = float(obj_floor)
+        else:
+            obj_floor_val = float(vals.min() * 0.5) if vals.size else 1e-12
+        obj_floor_val = max(obj_floor_val, 1e-300)
+
+    methods = df[method_col].dropna().unique()
+    palette = sns.color_palette(colormap, len(methods))
+    color_of = {m: palette[i] for i, m in enumerate(methods)}
+
+    fig, ax_obj = plt.subplots(figsize=figsize)
+    ax_viol = ax_obj.twinx()
+
+    obj_vals_for_ylim = []
+    viol_vals_plot = []
+
+    for method, g in df.groupby(method_col, sort=False):
+        g = g[[xcol, obj_col, viol_col]].copy()
+        for c in [xcol, obj_col, viol_col]:
+            g[c] = pd.to_numeric(g[c], errors="coerce")
+        g = g.dropna(subset=[xcol]).sort_values(xcol)
+
+        if xlog:
+            g = g[g[xcol] > 0]
+        if g.empty:
+            continue
+
+        col = color_of.get(method, "#000000")
+
+        go = g.dropna(subset=[obj_col])
+        if not go.empty:
+            xs = go[xcol].to_numpy()
+            ys = go[obj_col].to_numpy()
+
+            if obj_shift == "min":
+                ys = ys - obj_shift_val
+
+            if obj_ylog:
+                ys_plot = np.maximum(ys, obj_floor_val)
+                obj_vals_for_ylim.append(ys_plot)
+                ax_obj.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method))
+            else:
+                obj_vals_for_ylim.append(ys)
+                ax_obj.plot(xs, ys, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method))
+
+        gv = g.dropna(subset=[viol_col])
+        if not gv.empty:
+            xs = gv[xcol].to_numpy()
+            ys = gv[viol_col].to_numpy()
+            ys_plot = np.maximum(ys, viol_floor)
+            viol_vals_plot.append(ys_plot)
+            ax_viol.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha * 0.9, ls="--", label=str(method))
+
+    if xlog:
+        ax_obj.set_xscale("log")
+        ax_obj.xaxis.set_major_locator(LogLocator(base=10.0))
+        ax_obj.xaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+
+    if obj_ylog:
+        ax_obj.set_yscale("log")
+        ax_obj.yaxis.set_major_locator(LogLocator(base=10.0))
+        ax_obj.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+    else:
+        sf = ScalarFormatter(useMathText=True)
+        sf.set_scientific(True)
+        sf.set_powerlimits((-3, 3))
+        ax_obj.yaxis.set_major_formatter(sf)
+
+    ax_viol.set_yscale("log")
+    ax_viol.yaxis.set_major_locator(LogLocator(base=10.0))
+    ax_viol.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+
+    ax_obj.set_xlabel({"lr": "Learning Rate", "mu": r"$\mu$"}.get(xcol, xcol))
+    ax_obj.set_ylabel(
+        r"Obj (shifted):  $\mathrm{tr}(G^\top Z) - \min$" if obj_shift == "min"
+        else r"Obj:  $\mathrm{tr}(G^\top Z)$"
+    )
+    ax_viol.set_ylabel(r"Viol:  $\|(\mathcal{A}(Z)-\beta)_+\|_\infty/\beta$")
+    ax_obj.grid(axis="both", lw=0.4, ls="--", zorder=0)
+
+    # --- objective y-limits ---
+    if obj_ylim is not None:
+        y0, y1 = obj_ylim
+        if (y0 is not None) and (y1 is not None) and (y1 <= y0):
+            raise ValueError(f"obj_ylim must satisfy ymax>ymin, got {obj_ylim}")
+        if obj_ylog:
+            if (y0 is not None and y0 <= 0) or (y1 is not None and y1 <= 0):
+                raise ValueError(f"obj_ylim must be >0 when obj_ylog=True, got {obj_ylim}")
+        ax_obj.set_ylim(y0, y1)
+    else:
+        if obj_vals_for_ylim:
+            y = np.concatenate(obj_vals_for_ylim)
+            y = y[np.isfinite(y)]
+            if obj_ylog:
+                y = y[y > 0]
+                if y.size:
+                    lo, hi = float(y.min()), float(y.max())
+                    ax_obj.set_ylim(lo / (1.0 + margin), hi * (1.0 + margin))
+            else:
+                if y.size:
+                    lo, hi = float(y.min()), float(y.max())
+                    rng = hi - lo
+                    pad = (rng * margin) if rng > 0 else (max(abs(lo), abs(hi), 1.0) * margin)
+                    ax_obj.set_ylim(lo - pad, hi + pad)
+
+    # viol y-limits (auto)
+    if viol_vals_plot:
+        y = np.concatenate(viol_vals_plot)
+        y = y[np.isfinite(y) & (y > 0)]
+        if y.size:
+            lo, hi = float(y.min()), float(y.max())
+            ax_viol.set_ylim(lo / (1.0 + margin), hi * (1.0 + margin))
+
+    x_anchor = 1.0 + float(legend_gap)
+    h1, l1 = ax_obj.get_legend_handles_labels()
+    h2, l2 = ax_viol.get_legend_handles_labels()
+
+    if h1:
+        leg1 = ax_obj.legend(h1, l1, title=obj_col, loc="upper left",
+                             bbox_to_anchor=(x_anchor, 1.0), frameon=False)
+        ax_obj.add_artist(leg1)
+    if h2:
+        ax_obj.legend(h2, l2, title=viol_col, loc="lower left",
+                      bbox_to_anchor=(x_anchor, 0.0), frameon=False)
+
+    if title:
+        ax_obj.set_title(title)
+
+    fig.subplots_adjust(top=0.92, bottom=0.15, left=0.12, right=right_space)
+
+    if outfilename:
+        fig.savefig(outfilename, format="pdf", bbox_inches="tight")
+
+    return fig, (ax_obj, ax_viol)
 
 
 
