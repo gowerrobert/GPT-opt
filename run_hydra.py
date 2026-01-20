@@ -103,10 +103,37 @@ def main(config : DictConfig):
     if ddp:
         model_copy = DDP(model_copy, device_ids=[local_rank])
     
-    
-    p = model_copy.named_parameters() if ('muon' in opt_name or 'scion' in opt_name) else model_copy.parameters()
-
-    optimizer = optimizer_obj(p, **hyperp)
+    if model_config.get("enable_mup_with_base_n_embd", None) is None:
+        optimizer = optimizer_obj(model_copy.named_parameters(), **hyperp)
+    else:
+        if opt_config['name'] in ("muon", "scion", " muon-momo", "muonmax-momo"):
+            raise NotImplementedError("Muon and NESGD optimizers with muP parameter groups not implemented yet. Currently NESGD accept `named_parameters`. To implement muP parameter groups, we need to modify NESGD to accept parameter groups.")
+        # Borrowing this block from https://github.com/EleutherAI/nanoGPT-mup/blob/bcadbc3c7a44138525eca8a799764afba7dca2b3/model.py#L306-L329
+        param_dict = {pn: p for pn, p in model_copy.named_parameters() if p.requires_grad}
+        mup_decay_params = []
+        decay_params = []
+        nodecay_params = []
+        for n, p in param_dict.items():
+            if p.dim() >= 2:
+                if any(n.endswith(end) for end in ('c_fc.weight', 'c_proj.weight', 'c_attn.weight', 'c_gate.weight')):
+                    mup_decay_params.append((n, p))
+                else:
+                    decay_params.append((n, p))
+            else:
+                nodecay_params.append((n, p))
+        base_lr = hyperp['lr']
+        optim_groups = [
+            {'params': mup_decay_params, 'weight_decay': hyperp['weight_decay'], 'lr': base_lr / model_copy.mup_width_multiplier},
+            {'params': decay_params, 'weight_decay': hyperp['weight_decay'], 'lr': base_lr},
+            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': base_lr}
+        ]
+        print(f"num mup decayed parameter tensors: {len(mup_decay_params)}, with {sum(p.numel() for _, p in mup_decay_params):,} parameters. lr = {base_lr / model_copy.mup_width_multiplier}")
+        print("\t", *[n for n, _ in mup_decay_params], sep="\n\t")
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {sum(p.numel() for _, p in decay_params):,} parameters. lr = {base_lr}")
+        print("\t", *[n for n, _ in decay_params], sep="\n\t")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {sum(p.numel() for _, p in nodecay_params):,} parameters. lr = {base_lr}")
+        print("\t", *[n for n, _ in nodecay_params], sep="\n\t")
+        optimizer = optimizer_obj(optim_groups, **hyperp)
 
     scheduler = get_scheduler(opt_config, optimizer, total_iterations=total_iterations)
 
