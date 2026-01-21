@@ -1,10 +1,12 @@
 # Basically taken from Karpathy's llm.c repo
 # https://github.com/karpathy/llm.c/blob/master/train_gpt2.py
+from networkx import config
 import torch
 from torch import  nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 import math
+import numpy as np
 
 # --- RoPE utilities ---
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -47,6 +49,17 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
         return x * rms * self.weight
+    
+    
+class L1Norm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        l1 = x.abs().mean(dim=-1, keepdim=True).add(self.eps).reciprocal()
+        return x * l1 * self.weight
+
 
 class CausalSelfAttention(nn.Module):
 
@@ -62,6 +75,9 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.record_kq_max = config.record_kq_max
+        self.record_attn_logits_hist = config.record_attn_logits_hist
+        if config.record_attn_logits_hist:
+            self.attn_logits_hist = []
         self.kq_max = None
         self.kq_max_h = None 
         self.flash_attention = config.flash_attention and not self.record_kq_max
@@ -125,6 +141,11 @@ class CausalSelfAttention(nn.Module):
                         self.kq_max_h = torch.maximum(self.kq_max_h, smax_h)
                     else:
                         self.kq_max_h = smax_h 
+
+            if self.record_attn_logits_hist:
+                vals = att.masked_select(torch.isfinite(att)).float().detach().cpu().numpy()  
+                hist, bin_edges = np.histogram(vals, bins=50, density=True) 
+                self.attn_logits_hist = [hist, bin_edges]
                         
             att = F.softmax(att, dim=-1)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -152,6 +173,7 @@ class CausalSelfAttention(nn.Module):
             # consume the stored max to not clip again until next optimizer update
             self.kq_max_h = None  
 
+
 class MLP(nn.Module):
 
     def __init__(self, config):
@@ -171,12 +193,16 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
+
 class AttentionBlock(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         # Switched LayerNorm -> RMSNorm (fall back to Identity if disabled)
-        self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        if config.attn_l1_norm:
+            self.ln_1 = L1Norm(config.n_embd)
+        else:
+            self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.attn = CausalSelfAttention(config)
         self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.mlp = MLP(config)
@@ -203,6 +229,8 @@ class GPTConfig:
     kq_logit_softcap: float = None # 50
     kq_weight_clip: float = None # 100
     enable_mup_with_base_n_embd: int | None = None
+    attn_l1_norm: bool = False
+    record_attn_logits_hist: bool = False
 
 
 @dataclass

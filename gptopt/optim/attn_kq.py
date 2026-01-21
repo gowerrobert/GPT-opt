@@ -9,7 +9,7 @@ from .fast_pdhg import *
 from .fista import *
 from .attn_utils import *
 from .linop import *
-from .utils import name_by_param
+from .param_utils import name_by_param
 
 
 

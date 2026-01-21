@@ -398,6 +398,9 @@ python run.py --config configs/shakespeare.yaml
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adam.sh param_configs/adamw.json small_adamw 2 
 `
 
+
+# Hyperparameter tuning experiments
+
 ### Rho, mu grid search
 `
 ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam_fista.sh param_configs/attn_fista_rho_mu_sweep.json small_fista  16
@@ -493,3 +496,27 @@ python run.py --config configs/shakespeare.yaml
 `
 wandb sync /mnt/ceph/users/tparshakova/wandb_offline/wandb/offline-run-*
 `
+
+# L1Norm in attention layer 
+
+### Rho, mu grid search
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rho_mu_sweep_20it.json sm_f_20it  16
+`
+
+### Rho, mu grid search with momentum
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_m.json pm_f20_sm  16
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rho_mu_sweep_20it_prior_mv.json pmv_f20_sm  16
+`
+
+### Baselines
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adamw_classic.sh param_configs/adamw_classic_kq_all_lr_l1.json sm_baselines 8
+`
+
+### Lr sweep

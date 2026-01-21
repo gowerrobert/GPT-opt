@@ -167,13 +167,20 @@ def train(train_dataloader, val_dataloader, model, optimizer, training_params, l
                         base_model = getattr(model, "module", model)
                         kq_max = None
                         # get maximum kq_max over all layers
-                        for m in base_model.modules():
+                        for layer_idx, m in enumerate(base_model.modules()):
                             if isinstance(m, CausalSelfAttention) and getattr(m, "kq_max", None) is not None:
                                 v = m.kq_max
                                 if kq_max is None or v > kq_max:
                                     kq_max = v
                                 # reset kq_max for minibatches
                                 m.kq_max = None
+
+                                if getattr(model.config, "record_attn_logits_hist", False): 
+                                    hist, bin_edges = m.attn_logits_hist 
+                                    wandb_log_dict[f"train/attn_logits_hist/layer_{int(layer_idx):02d}/hist"] = wandb.Histogram(np_histogram=(hist, bin_edges))
+
+
+
                         if kq_max is not None:
                             wandb_log_dict["train/kq_max"] = kq_max
                             logger.kq_max.append(kq_max)
