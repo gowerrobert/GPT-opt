@@ -43,6 +43,7 @@ class AttnPDAdamW(Optimizer):
 
         defaults = dict(
             lr=lr,
+            base_lr=lr,
             betas=betas,
             eps=eps,
             weight_decay=weight_decay, 
@@ -61,7 +62,7 @@ class AttnPDAdamW(Optimizer):
         )
         print(
             f"[AttnPDAdamW] lr={lr}, {betas=}, {eps=}, wd={weight_decay}, "
-            f"{rho_over_lr=}, {attn_max_iter=}, {warm_start=}, {lsqr_max_iter=}"
+            f"{rho_over_lr=}, {attn_max_iter=}, {warm_start=}, {lsqr_max_iter=}, {mu_frac=}, "
             f"{attn_momentum=}, {diag_scaling=}, {pd_type=}, {reflected_halpern=}, {enable_restart=}"
         )
         super().__init__(params, defaults)
@@ -212,7 +213,7 @@ class AttnPDAdamW(Optimizer):
         # upper bound on the operator norm of mathcal{A}
         lamb_max = A_linop.fro_norm
         mu_reg = 0 
-        beta = group["rho_over_lr"] * group["lr"]
+        beta = group["rho_over_lr"] * group["base_lr"] 
 
         # Update key-query weights via PDHG or FISTA
         prox_h_conj = lambda y, rho, R: prox_l1(y, rho * beta, R=R)

@@ -502,7 +502,7 @@ wandb sync /mnt/ceph/users/tparshakova/wandb_offline/wandb/offline-run-*
 ### Rho, mu grid search
 
 `
-./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rho_mu_sweep_20it.json sm_f_20it  16
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rho_mu_sweep_20it.json f20_sm  16
 `
 
 ### Rho, mu grid search with momentum
