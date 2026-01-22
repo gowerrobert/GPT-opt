@@ -519,4 +519,17 @@ wandb sync /mnt/ceph/users/tparshakova/wandb_offline/wandb/offline-run-*
 ./slurm_scripts/submit.sh scripts/run_fineweb1B_adamw_classic.sh param_configs/adamw_classic_kq_all_lr_l1.json sm_baselines 8
 `
 
-### Lr sweep
+### Lr sweep 
+
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rhomu_best_val_lr_sweep_l1_20it.json f_bv_lr  8
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rhomu_best_kq_lr_sweep_l1_20it.json f_bkq_lr  8
+`
+`
+GPU_CONSTRAINT='a100-80gb' ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rhomu_best_val_lr_sweep_l1_100it.json f_100bv_lr  8
+`
+`
+GPU_CONSTRAINT='a100-80gb' ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rhomu_best_kq_lr_sweep_l1_100it.json f_100bkq_lr  8
+`

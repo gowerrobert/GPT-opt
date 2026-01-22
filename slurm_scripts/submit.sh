@@ -24,7 +24,7 @@ mode=$(echo "$mode" | tr '[:lower:]' '[:upper:]')
 
 # Choose partition via env var (default gpu). Example: PARTITION=eval ./submit.sh ...
 partition=${PARTITION:-gpu}            # default 1 GPU per task
-gpu_constraint=${GPU_CONSTRAINT:-h100}          # e.g., h100, a100; empty = no constraint
+gpu_constraint=${GPU_CONSTRAINT:-h100|a100-80gb}          # e.g., h100, a100; empty = no constraint
 
 # Set up environment variables and directories
 LOG_DIR="${ROOT_DIR}/logs/${group_name}"
@@ -39,7 +39,7 @@ echo "group_name: $group_name"
 echo "count: $count"
 echo "mode: $mode"
 echo "partition: $partition"
-echo "constraint: ${constraint:-<none>}"
+echo "constraint: ${gpu_constraint:-<none>}"
 
 # Create necessary directories
 mkdir -p "$RUN_INFO_DIR"
