@@ -199,12 +199,15 @@ class AttentionBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         # Switched LayerNorm -> RMSNorm (fall back to Identity if disabled)
-        if config.attn_l1_norm:
+        if config.attn_l1_norm or config.l1_norm_all_layers:
             self.ln_1 = L1Norm(config.n_embd)
         else:
             self.ln_1 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
+        if config.l1_norm_all_layers:
+            self.ln_2 = L1Norm(config.n_embd)
+        else:
+            self.ln_2 = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.mlp = MLP(config)
 
     def forward(self, x):
@@ -230,6 +233,7 @@ class GPTConfig:
     kq_weight_clip: float = None # 100
     enable_mup_with_base_n_embd: int | None = None
     attn_l1_norm: bool = False
+    l1_norm_all_layers: bool = False
     record_attn_logits_hist: bool = False
 
 
@@ -245,12 +249,16 @@ class GPT(nn.Module):
         self.config = config
         self.device = device
        
+        if config.l1_norm_all_layers:
+            ln_f_value = L1Norm(config.n_embd)
+        else:
+            ln_f_value = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity()
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([AttentionBlock(config) for _ in range(config.n_layer)]),
             # Switched final LayerNorm -> RMSNorm
-            ln_f = RMSNorm(config.n_embd) if not config.no_layernorm else nn.Identity(),
+            ln_f = ln_f_value
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.LLMC_SKIP_INIT = 1 # don't init this one, we will tie weights

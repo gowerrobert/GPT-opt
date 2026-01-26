@@ -6,6 +6,10 @@ from .linop import *
 
 
 
+
+
+
+
 def solve_lsmr_Y_lstsq(A_linop, Grad, maxiter=1000):
     # Minimize $\|\mathcal{A}^*(Y) + G\|_F^2$
     n_sq, mn2 = A_linop.shape          # (n^2, 2mn)
@@ -47,7 +51,7 @@ def unpack_Z(z_vec, m, n):
     # inverse of pack_Z
     z_vec = z_vec.reshape(-1)
     Z1 = z_vec[:m*n].reshape(m, n)
-    Z2 = z_vec[m*n:].reshape(n, m).T   # <-- critical
+    Z2 = z_vec[m*n:].reshape(n, m).T   
     return torch.cat([Z1, Z2], dim=0)  # (2m, n)
 
 def pack_Y(Y, n):

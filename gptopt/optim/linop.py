@@ -2,7 +2,7 @@ import torch
 from torchmin.lstsq.linear_operator import TorchLinearOperator
 from typing import Optional, Callable, Literal, Any
 from torch._vmap_internals import _vmap 
-
+from einops import rearrange, einsum
 
 
     
@@ -20,6 +20,84 @@ def attn_linop_from_matrices(A1, A2):
     A_linop.A2 = A2
     A_linop.dtype = A1.dtype
     return A_linop
+
+
+def attn_linop_from_matrices_heads(A1, A2, n_head):
+    """A1, A2: (n_head * n_att, n_embd)
+       A1 = (A1^1, ..., A1^h), A2 = (A2^1, ..., A2^h)
+       (n_head zs n_att) n_embd
+       Z = (Z1^1, Z2^1, ..., Z1^h, Z2^h)
+       (n_head n_embd1) n_embd2
+       Y = (Y_1, ..., Y_h)
+       A(Z) = (Z1_1^T A1_1 + A2_1^T Z2_1, ..., Z1_h^T A1_h + A2_h^T Z2_h)
+       A(Y) = (A1_1 Y_1^T, A2_1 Y_1, ..., A1_h Y_h^T, A2_h Y_h)
+    """
+    matvec = matvec_attn_linop_heads(A1=A1, A2=A2, n_head=n_head)
+    rmatvec = matvec_attn_linop_adj_heads(A1=A1, A2=A2, n_head=n_head)
+    fro_norm = fro_norm_attn_linop_heads(A1=A1, A2=A2, n_head=n_head)
+    m, n = A1.shape
+    A_linop = TorchLinearOperator(matvec=matvec, rmatvec=rmatvec, 
+                                    shape=(n_head*n**2, 2*n_head*m*n))
+    A_linop.fro_norm = fro_norm
+    A_linop.device = A1.device
+    A_linop.A1 = A1
+    A_linop.A2 = A2
+    A_linop.dtype = A1.dtype
+    return A_linop
+
+
+def matvec_attn_linop_heads(*, A1, A2, n_head): 
+    # A(Z) = (Z1_1^T A1_1 + A2_1^T Z2_1, ..., Z1_h^T A1_h + A2_h^T Z2_h)
+    A1_heads, A2_heads = A1_A2_unpack_heads(A1, A2, n_head)
+    return lambda Z: mathcal_A_linop_heads(A1=A1_heads, A2=A2_heads, Z=Z, n_head=n_head)
+
+
+def mathcal_A_linop_heads(*, A1, A2, Z, n_head): # A_heads operator
+    # Z = (Z1^1, Z2^1, ..., Z1^h, Z2^h)
+    Z = rearrange(Z, "(n_head zs n_att) n_embd -> zs n_head n_att n_embd", 
+                n_head=n_head, zs=2)
+    res = einsum(Z[0], A1, 'n_head n_att n_embd1, n_head n_att n_embd2 -> n_head n_embd1 n_embd2')
+    res.add_(einsum(A2,  Z[1], 'n_head n_att n_embd1, n_head n_att n_embd2 -> n_head n_embd1 n_embd2'))
+    return rearrange(res, "n_head n_embd1 n_embd2 -> (n_head n_embd1) n_embd2")
+
+
+def matvec_attn_linop_adj_heads(*, A1, A2, n_head): 
+    # A(Y) = (A1_1 Y_1^T, A2_1 Y_1, ..., A1_h Y_h^T, A2_h Y_h)
+    A1_heads, A2_heads = A1_A2_unpack_heads(A1, A2, n_head)
+    return lambda Y: mathcal_A_linop_adj_heads(A1=A1_heads, A2=A2_heads, Y=Y, n_head=n_head)
+
+
+def mathcal_A_linop_adj_heads(*, A1, A2, Y, n_head): # A_heads operator
+    # Y = (Y_1, ..., Y_h)
+    Y = rearrange(Y, "(n_head n_embd1) n_embd2 -> n_head n_embd1 n_embd2",
+                n_head=n_head)
+    A1Yt = einsum(A1, Y, 'n_head n_att n_embd2, n_head n_embd1 n_embd2 -> n_head n_att n_embd1')
+    A2Y  = einsum(A2, Y, 'n_head n_att n_embd1, n_head n_embd1 n_embd2 -> n_head n_att n_embd2')
+    res = rearrange([A1Yt, A2Y], "zs n_head n_att n_embd -> (n_head zs n_att) n_embd")
+    return res
+
+
+def fro_norm_attn_linop_heads(*, A1, A2, n_head): 
+    A1_heads = rearrange(A1, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head)
+    A2_heads = rearrange(A2, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head)
+    lamb_max = ((A1_heads.pow(2) + A2_heads.pow(2)).sum(dim=(1, 2)).max()) ** 0.5
+    return lamb_max.item()
+
+
+def Z_unpack_Z1_Z2_heads(Z, n_head):
+    # Z = (Z1^1, Z2^1, ..., Z1^h, Z2^h)
+    # return Z1=(Z1^1, ..., Z1^h), Z2=(Z2^1, ..., Z2^h)
+    return rearrange(Z, "(n_head zs n_att) n_embd -> zs n_head n_att n_embd", 
+                n_head=n_head, zs=2)
+
+def A1_A2_unpack_heads(A1, A2, n_head):
+    A1_heads = rearrange(A1, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head)
+    A2_heads = rearrange(A2, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head)
+    return A1_heads, A2_heads
 
 
 def matvec_attn_linop(*, A1, A2): 

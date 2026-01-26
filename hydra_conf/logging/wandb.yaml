@@ -10,5 +10,5 @@ logging_params:
   ckpt_dir: ""
   results_dir: "outputs/hydra-results/my_experiment" 
   wandb:
-    project: "gpt-opt-kq-max"
+    project: "gptopt-kq-max-heads"
     name: ${model.name}_${model.kq_max_type}_${data.dataset.name}_${optimizer.optimizer_params.name}_${paths.run_name}

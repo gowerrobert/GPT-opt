@@ -37,7 +37,8 @@ class AttnPDAdamW(Optimizer):
         enable_restart: bool = False,
         lsqr_max_iter: int = 500, 
         mu_frac: float = 0.1, # fraction of mu_max, mu = mu_frac * mu_max
-        bias_correction: bool = True
+        bias_correction: bool = True,
+        n_head=1
     ):
         params, self.name_by_param = name_by_param(named_params)
 
@@ -58,7 +59,8 @@ class AttnPDAdamW(Optimizer):
             enable_restart=enable_restart,
             lsqr_max_iter=lsqr_max_iter,
             mu_frac=mu_frac,
-            bias_correction=bias_correction
+            bias_correction=bias_correction,
+            n_head=n_head
         )
         print(
             f"[AttnPDAdamW] lr={lr}, {betas=}, {eps=}, wd={weight_decay}, "
@@ -199,6 +201,7 @@ class AttnPDAdamW(Optimizer):
         pd_type = group["pd_type"] 
         lsqr_max_iter = group["lsqr_max_iter"] 
         attn_max_iter = group["attn_max_iter"] 
+        n_head = group["n_head"]
         n_embed = p.shape[1] 
         assert p.shape[0] == 3 * n_embed
         # A1=W_q, A2=W_k, G1=G_k, G2=G_q
@@ -206,7 +209,7 @@ class AttnPDAdamW(Optimizer):
         A2, G1   = p[n_embed:2 * n_embed, :],       g[n_embed:2 * n_embed, :]
         assert A1.shape == G2.shape and A2.shape == G1.shape 
 
-        A_linop = attn_linop_from_matrices(A1, A2)
+        A_linop = attn_linop_from_matrices_heads(A1, A2, n_head=n_head)
         
         Grad = torch.cat([G1, G2], dim=0)
 
@@ -228,7 +231,7 @@ class AttnPDAdamW(Optimizer):
             Y0, Z0 = None, None
 
         if attn_max_iter == 0: # use values directly from LSQR 
-            Z1_t, Z2_t = Z0[:n_embed], Z0[n_embed:]
+            Z_t = Z0
             r1, r1_rel, r2, r2_rel = pd_residuals_max_ball_linop(
                 A_linop=A_linop, Y=Y0, Z=Z0, Grad=Grad, beta=beta, mu=mu_reg)
             residuals = {'r1': [r1], 'r2': [r2], 'r1_rel': [r1_rel], 'r2_rel': [r2_rel], 
@@ -247,7 +250,7 @@ class AttnPDAdamW(Optimizer):
                                         h_conj=h_conj, pd_residuals=pd_residuals_max_ball_linop,
                                         reflected_halpern=group["reflected_halpern"], 
                                         enable_restart=group["enable_restart"])
-            Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
+
             
         elif pd_type == "fista":
             # Run FISTA
@@ -260,13 +263,13 @@ class AttnPDAdamW(Optimizer):
                 lamb_max=lamb_max, max_iter=attn_max_iter,
                 eps_abs=1e-6, eps_rel=1e-12, stopping=False,
                 Y0=Y0, pd_residuals=pd_residuals_max_ball_linop
-            )
-            Z1_t, Z2_t = Z_t[:n_embed], Z_t[n_embed:]
+            ) 
             norm_Y = torch.norm(Y_fista, p='fro').item() 
 
         residuals["G1_norm"] = G1.norm().item()
         residuals["G2_norm"] = G2.norm().item()
         residuals["Y_norm"] = norm_Y
+        Z1_t, Z2_t = Z_unpack_Z1_Z2_heads(Z_t, n_head=n_head)
         
         return Z1_t, Z2_t, residuals
 

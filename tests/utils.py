@@ -31,7 +31,7 @@ from gptopt.optim.attn_kq import *
 from gptopt.optim.attn_utils import *
 from gptopt.optim.fast_pdhg import *
 from gptopt.optim.fista import fista_ls_l1_reg
-
+from gptopt.optim.linop import *
 
 
 def cvxpy_ls_l1_reg(W_k, W_q, G_wk, G_wq, beta, mu):
@@ -682,6 +682,44 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     lamb_max = (nA * nA + nB * nB) ** 0.5
 
     return A, B, G1, G2, A_np, B_np, G1_np, G2_np, lamb_max
+
+
+def generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, eps=1e-12, device="cuda"):
+    # generate random matrix mxn with operator norm 1 and given rank 
+    A = einsum(torch.randn(n_head, m, rank, device=device), torch.randn(n_head, rank, n, device=device),
+               "h m r, h r n -> h m n") 
+    r_A = (torch.abs(A).sum(axis=-1)**0.5)[:, :, None]               
+    c_A = (torch.abs(A).sum(axis=-2)**0.5)[:, None, :]
+    inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))
+    inv_cA = torch.where(c_A > 0, 1.0 / (c_A + eps), torch.zeros_like(c_A))
+    res = (inv_rA * A) * inv_cA
+    return rearrange(res, "n_head n1 n2 -> (n_head n1) n2")  # (n_head*n, n)
+
+
+def gaussian_data_heads(m, n, n_head=1, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=False):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    A1 = torch.randn(n_head * m, n, device=device) * std1
+    A2 = torch.randn(n_head * m, n, device=device) * std1
+    rank = int(min(m, n) * rank_ratio)
+    if G_in_range: 
+        Y0 = generate_matrix_rank_normalized_op_torch(n, n, rank, n_head, device=device) * std2
+        Grad = matvec_attn_linop_adj_heads(A1=A1, A2=A2, n_head=n_head)(Y0)
+        G1, G2 = rearrange(Grad, "(n_head zs) n_att n_embd1 -> zs (n_head n_att) n_embd1",
+                 zs=2, n_head=n_head)
+    else:
+        rank = int(min(m, n) * rank_ratio)
+        G1 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device) * std2
+        G2 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device) * std2
+        if debug:
+            assert torch.norm(G1, ord=2) <= std2 + 1e-5 and \
+                    torch.norm(G2, ord=2) <= std2 + 1e-5
+
+    A1_heads = rearrange(A1, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head)
+    A2_heads = rearrange(A2, "(n_head n_att) n_embd -> n_head n_att n_embd",
+                n_head=n_head) 
+    
+    return A2, A1, G1, G2
 
 
 def make_output_path_hydra(config, output_dir):

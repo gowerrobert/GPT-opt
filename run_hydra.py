@@ -13,7 +13,7 @@ import os
 import wandb
 import hydra
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 OmegaConf.register_new_resolver("div", lambda x, y: x // y)
 
@@ -95,6 +95,8 @@ def main(config : DictConfig):
     model_copy = copy.deepcopy(model).to(device)
     opt_name = opt_config['name']
     # Setup optimizer
+    with open_dict(opt_config):
+        opt_config["n_head"] = model_config.get("n_head", None)
     optimizer_obj, hyperp = get_optimizer(opt_config, lr=opt_config['lr'])
 
 

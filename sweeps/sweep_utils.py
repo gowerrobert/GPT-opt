@@ -433,6 +433,7 @@ def plot_obj_viol_sweep_over_models(
     obj_floor=None,
     # --- NEW ---
     obj_ylim=None,        # None or (ymin, ymax) in *plotted* objective coords
+    markersize=6,
 ):
     for c in [method_col, xcol, obj_col, viol_col]:
         if c not in df.columns:
@@ -506,10 +507,12 @@ def plot_obj_viol_sweep_over_models(
             if obj_ylog:
                 ys_plot = np.maximum(ys, obj_floor_val)
                 obj_vals_for_ylim.append(ys_plot)
-                ax_obj.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method))
+                ax_obj.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method),
+                            marker="o", markersize=markersize, markeredgewidth=1.5)
             else:
                 obj_vals_for_ylim.append(ys)
-                ax_obj.plot(xs, ys, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method))
+                ax_obj.plot(xs, ys, color=col, lw=linewidth, alpha=alpha, ls="-", label=str(method),
+                            marker="o", markersize=markersize, markeredgewidth=1.5)
 
         gv = g.dropna(subset=[viol_col])
         if not gv.empty:
@@ -517,7 +520,8 @@ def plot_obj_viol_sweep_over_models(
             ys = gv[viol_col].to_numpy()
             ys_plot = np.maximum(ys, viol_floor)
             viol_vals_plot.append(ys_plot)
-            ax_viol.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha * 0.9, ls="--", label=str(method))
+            ax_viol.plot(xs, ys_plot, color=col, lw=linewidth, alpha=alpha * 0.9, ls="--", label=str(method),
+                         marker="o", markersize=markersize, markeredgewidth=1.5)
 
     if xlog:
         ax_obj.set_xscale("log")
@@ -614,7 +618,8 @@ def plot_lr_sweep_over_models(
     linewidth=3.0,
     alpha=0.8,
     title="",
-    ylim=None
+    ylim=None,
+    markersize=6,
 ):
     """
     Plot a LR sweep from a DataFrame.
@@ -671,7 +676,10 @@ def plot_lr_sweep_over_models(
             color=colormap.get(model, "#000000"),
             linestyle=None,
             linewidth=linewidth,
-            alpha=alpha
+            alpha=alpha,
+            marker="o",           # add circles at points
+            markersize=markersize, 
+            markeredgewidth=1.5
         )
 
     ax.set_xscale("log")

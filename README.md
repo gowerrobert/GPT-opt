@@ -533,3 +533,28 @@ GPU_CONSTRAINT='a100-80gb' ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adam
 `
 GPU_CONSTRAINT='a100-80gb' ./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_classic_l1.sh param_configs/attn_fista_rhomu_best_kq_lr_sweep_l1_100it.json f_100bkq_lr  8
 `
+
+#### Momentum
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rhomu_pm_best_val_lr_sweep_l1_20it.json f_bv_m_lr  8
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rhomu_pm_best_kq_lr_sweep_l1_20it.json f_bkq_m_lr  8
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rhomu_pmv_best_val_lr_sweep_l1_20it.json f_bv_mv_lr  8
+`
+`
+./slurm_scripts/submit.sh  scripts/run_fineweb1B_adamw_classic_fista_momentum_l1.sh param_configs/attn_fista_rhomu_pmv_best_kq_lr_sweep_l1_20it.json f_bkq_mv_lr  8
+`
+
+
+# Correct implementation wrt heads in attention
+
+# L1Norm in all layers 
+
+
+### Baselines
+`
+./slurm_scripts/submit.sh scripts/run_fineweb1B_adamw_classic.sh param_configs/adamw_classic_kq_all_lr_l1_all_layers.json sm_baselines 8
+`
