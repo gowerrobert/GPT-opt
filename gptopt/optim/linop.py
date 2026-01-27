@@ -82,6 +82,14 @@ def Z_unpack_Z1_Z2_heads(Z, n_head):
     return rearrange(Z, "(n_head zs n_att) n_embd -> zs n_head n_att n_embd", 
                 n_head=n_head, zs=2)
 
+
+def Z_unpack_Z1_Z2_hnatt(Z, n_head):
+    #          Z = (Z1^1, Z2^1, ..., Z1^h, Z2^h)
+    #         Z1 = (Z1^1, ..., Z1^h)
+    #         Z2 = (Z2^1, ..., Z2^h)
+    return rearrange(Z, "(n_head zs n_att) n_embd -> zs (n_head n_att) n_embd", 
+                n_head=n_head, zs=2)
+
 def Z1_Z2_pack_Z_heads(Z1, Z2, n_head):
     #          Z = (Z1^1, Z2^1, ..., Z1^h, Z2^h)
     #         Z1 = (Z1^1, ..., Z1^h)

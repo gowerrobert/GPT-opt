@@ -3,11 +3,11 @@ optimizer_params:
   lr: 0.001
   betas: [0.95, 0.95]
   weight_decay: 0
-  lr_schedule: constant-linear
-  warm_up_fraction: 0.4
+  lr_schedule: warm-up-cosine
+  warm_up_fraction: 0.1
   rho_over_lr: 1
   attn_max_iter: 0
-  lsqr_max_iter: 200
+  lsqr_max_iter: 100
   momentum: false 
   attn_momentum: "none"  # "none", "prior_m", "prior_mv", "post"
   diag_scaling: false  

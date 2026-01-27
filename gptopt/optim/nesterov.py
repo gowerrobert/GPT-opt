@@ -64,4 +64,4 @@ def nesterov_lmax_moreau(A_linop: TorchLinearOperator,
         if attn_stopping_criteria(r1, r2, r1_rel, r2_rel, eps_abs, eps_rel, min_iter, t) and stopping: 
             break 
     
-    return Z, record.as_dict()
+    return Z, record.as_dict(), Y

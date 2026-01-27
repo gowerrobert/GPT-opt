@@ -7,6 +7,7 @@ from .least_squares_torchmin import solve_lsmr_Y_lstsq, solve_lsmr_Z_lstsq
 
 from .fast_pdhg import *
 from .fista import *
+from .nesterov import *
 from .attn_utils import *
 from .linop import *
 from .param_utils import name_by_param
@@ -265,10 +266,24 @@ class AttnPDAdamW(Optimizer):
             ) 
             norm_Y = torch.norm(Y_fista, p='fro').item() 
 
+        elif pd_type == "nesterov":
+            # Run Nesterov
+            # mu_max = \|A(G)\|_\max / \beta
+            mu_max = (A_linop.matvec(Grad)).abs().max().item() / beta 
+            mu_reg = max(group["mu_frac"] * mu_max, 1e-6)
+            Z_t, residuals, Y_nest = nesterov_lmax_moreau(
+                A_linop=A_linop, Grad=Grad,
+                beta=beta, mu=mu_reg,
+                max_iter=attn_max_iter, Z0=Z0,
+                eps_abs=1e-6, eps_rel=1e-12, stopping=False,
+                pd_residuals=pd_residuals_max_ball_linop
+            )
+            norm_Y = torch.norm(Y_nest, p='fro').item() 
+
         residuals["G1_norm"] = G1.norm().item()
         residuals["G2_norm"] = G2.norm().item()
         residuals["Y_norm"] = norm_Y
-        Z1_t, Z2_t = Z_unpack_Z1_Z2_heads(Z_t, n_head=n_head)
+        Z1_t, Z2_t = Z_unpack_Z1_Z2_hnatt(Z_t, n_head=n_head)
         
         return Z1_t, Z2_t, residuals
 

@@ -218,8 +218,7 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A_linop, Grad, beta, mu_reg,
 
     settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
              "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False},
-             "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
-           # "pdhg eq": {"diag_scaling": False, "equilibration": True, "reflected_halpern":False, "enable_restart": False},
+             "pdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":False, "enable_restart": False}, 
           "rehpdhg ds": {"diag_scaling": True, "equilibration": False, "reflected_halpern":True, "enable_restart": False}
            }
     if mu_reg == 0:
@@ -243,8 +242,7 @@ def compare_methods_fast_pdhg(prox_h_conj, h_conj, A_linop, Grad, beta, mu_reg,
             stopping=stopping, Y0=Y0, Z0=Z0,
             h_conj=h_conj, beta=beta, pd_residuals=pd_residuals,
             f_star=f_star, mu=mu_reg,
-            diag_scaling=settings[setting]["diag_scaling"], 
-            equilibration=settings[setting]["equilibration"],
+            diag_scaling=settings[setting]["diag_scaling"],  
             reflected_halpern=settings[setting]["reflected_halpern"],
             enable_restart=settings[setting]["enable_restart"],
             verbose=versbose, theta=theta
@@ -311,7 +309,7 @@ def compare_methods_fista_nesterov(A_linop, Grad, beta, mu_reg, mu_moreau,
 
     AG_max = A_linop.mv(Grad).abs().max().item()
     Z0 = - (beta * 1.2 / AG_max) * Grad
-    Z_t, res = nesterov_lmax_moreau(
+    Z_t, res, _ = nesterov_lmax_moreau(
                 A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
@@ -324,7 +322,7 @@ def compare_methods_fista_nesterov(A_linop, Grad, beta, mu_reg, mu_moreau,
     Z0 = torch.randn_like(Grad)
     AZ_max = A_linop.mv(Z0).abs().max().item()
     Z0 = (beta * 1.2 / AZ_max) * Z0
-    Z_t, res = nesterov_lmax_moreau(
+    Z_t, res, _ = nesterov_lmax_moreau(
                 A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
@@ -335,7 +333,7 @@ def compare_methods_fista_nesterov(A_linop, Grad, beta, mu_reg, mu_moreau,
     metrics["nesterov rand init"] = { "obj": func_obj(Z_t), "viol": func_constr_viol(Z_t)}
       
     Z0 = None
-    Z_t, res = nesterov_lmax_moreau(
+    Z_t, res, _ = nesterov_lmax_moreau(
                 A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu_moreau, 
                 max_iter=max_iter, Z0=Z0,
@@ -400,7 +398,7 @@ def compare_methods_fista_nesterov_mu(A_linop, Grad, beta, mu_range_fista,
         mu = mu_scale * mu_max 
         
         for method, Z0_method in settings.items():
-            Z_t, res = nesterov_lmax_moreau(
+            Z_t, res, _ = nesterov_lmax_moreau(
                 A_linop=A_linop, Grad=Grad,
                 beta=beta, mu=mu,
                 max_iter=max_iter, Z0=Z0_method,
@@ -434,8 +432,10 @@ def compare_methods_fista_pdhg_mu(A_linop, Grad, beta, mu_range_fista,
     rows = []
 
     settings = {"pdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
+                "pdhg ds": {"diag_scaling": False, "equilibration": False, "reflected_halpern":False, "enable_restart": False},
              "rehpdhg": {"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": False}, 
-           "ada rehpdhg":{"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}}
+        #    "ada rehpdhg":{"diag_scaling": False, "equilibration": False, "reflected_halpern":True, "enable_restart": True}
+           }
     
     for mu_scale in mu_range_fista:
         mu = mu_scale * mu_max 
