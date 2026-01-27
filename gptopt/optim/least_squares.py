@@ -276,13 +276,6 @@ def Z_sylvester_solve(*, A1, A2, Y0, beta, Z1_0=None, Z2_0=None, verbose=True,
     return Z1, Z2, res
 
 
-def matcal_A_to_kron_Kron(A1, A2):
-    A1t = A1.T.contiguous()
-    A2t = A2.T.contiguous()
-    n = A1.shape[1]
-    In = torch.eye(n, device=A1.device, dtype=A1.dtype)
-    K = torch.cat([torch.kron(A1t, In), torch.kron(In, A2t)], dim=1)
-    return K
 
 def matcal_AAT_to_kron_Kron(A1, A2):
     A1tA1 = A1.T @ A1              
@@ -407,25 +400,25 @@ def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm
 
     if agg_op == "l1_norm":
         # |B| row/col sums 
-        r_B = B.abs().sum(dim=1)                 # (p1,)
-        c_B = B.abs().sum(dim=0)                 # (n,)
+        r_A2 = B.abs().sum(dim=1)                 # (p1,)
+        c_A2 = B.abs().sum(dim=0)                 # (n,)
 
         # |A| row/col sums 
-        r_A = A.abs().sum(dim=1)                 # (p2,)
-        c_A = A.abs().sum(dim=0)                 # (n,)
+        r_A1 = A.abs().sum(dim=1)                 # (p2,)
+        c_A1 = A.abs().sum(dim=0)                 # (n,)
     elif agg_op == "l2_norm_sq":
         # |B| row/col sums 
-        r_B = B.pow(2).sum(dim=1)                 # (p1,)
-        c_B = B.pow(2).sum(dim=0)                 # (n,)
+        r_A2 = B.pow(2).sum(dim=1)                 # (p1,)
+        c_A2 = B.pow(2).sum(dim=0)                 # (n,)
 
         # |A| row/col sums 
-        r_A = A.pow(2).sum(dim=1)                 # (p2,)
-        c_A = A.pow(2).sum(dim=0)                 # (n,) 
+        r_A1 = A.pow(2).sum(dim=1)                 # (p2,)
+        c_A1 = A.pow(2).sum(dim=0)                 # (n,) 
  
-    inv_rB = torch.where(r_B > 0, 1.0 / (r_B + eps), torch.zeros_like(r_B))
-    inv_rA = torch.where(r_A > 0, 1.0 / (r_A + eps), torch.zeros_like(r_A))
+    inv_rB = torch.where(r_A2 > 0, 1.0 / (r_A2 + eps), torch.zeros_like(r_A2))
+    inv_rA = torch.where(r_A1 > 0, 1.0 / (r_A1 + eps), torch.zeros_like(r_A1))
     inv_c_sum = torch.where(
-            (c_B[None, :] + c_A[:, None]) > 0, 1.0 / (c_B[None, :] + c_A[:, None] + eps),
+            (c_A2[None, :] + c_A1[:, None]) > 0, 1.0 / (c_A2[None, :] + c_A1[:, None] + eps),
             torch.zeros((n, n), device=device, dtype=dtype))
 
     # Diagonal entries as broadcastable tensors: 
@@ -434,7 +427,7 @@ def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm
     Gamma_2 = eta * inv_rA[:, None]               # (p2, 1)  for Z2 (same across its n cols)
 
     if debug:
-        assert torch.allclose(1/inv_c_sum, torch.ones(n, 1) @ c_B[None, :] + c_A[:, None] @ torch.ones(1, n)), "Column sum mismatch!"
+        assert torch.allclose(1/inv_c_sum, torch.ones(n, 1) @ c_A2[None, :] + c_A1[:, None] @ torch.ones(1, n)), "Column sum mismatch!"
         print("Diagonal PDHG scaling computed.")
         print(f"{R.mean().item():.4e} +- {R.std().item():.4e}, "
             f"{Gamma_1.mean().item():.4e} +- {Gamma_1.std().item():.4e}, "
@@ -442,6 +435,7 @@ def pdhg_diagonal_scaling(A, B, eta=0.99, eps=1e-8, debug=False, agg_op="l1_norm
         matrix_details(A)
         matrix_details(B)
     return R, Gamma_1, Gamma_2 
+
 
 
 

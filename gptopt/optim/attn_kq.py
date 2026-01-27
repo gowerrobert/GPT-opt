@@ -210,8 +210,7 @@ class AttnPDAdamW(Optimizer):
         assert A1.shape == G2.shape and A2.shape == G1.shape 
 
         A_linop = attn_linop_from_matrices_heads(A1, A2, n_head=n_head)
-        
-        Grad = torch.cat([G1, G2], dim=0)
+        Grad = Z1_Z2_pack_Z_heads(G1, G2, n_head=n_head)
 
         # upper bound on the operator norm of mathcal{A}
         lamb_max = A_linop.fro_norm
@@ -223,9 +222,9 @@ class AttnPDAdamW(Optimizer):
         h_conj = lambda y: beta * torch.abs(y).sum()
         
         if group["warm_start"] or attn_max_iter == 0: 
-            Y0, res_lsmr_y, itn_y = solve_lsmr_Y_lstsq(A_linop, Grad, maxiter=lsqr_max_iter)
+            Y0, res_lsmr_y, itn_y = solve_lsmr_Y_lstsq(A_linop, Grad, maxiter=lsqr_max_iter, n_head=n_head)
             if pd_type != "fista" or attn_max_iter == 0:
-                Z0, res_lsmr_z, itn_z = solve_lsmr_Z_lstsq(A_linop, beta, Y0, maxiter=lsqr_max_iter)
+                Z0, res_lsmr_z, itn_z = solve_lsmr_Z_lstsq(A_linop, beta, Y0, maxiter=lsqr_max_iter, n_head=n_head)
                 r1, r1_rel, r2, r2_rel = pd_residuals_max_ball_linop(A_linop, Y0, Z0, Grad, beta, mu_reg)
         else:
             Y0, Z0 = None, None

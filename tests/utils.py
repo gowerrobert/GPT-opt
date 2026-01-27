@@ -31,7 +31,64 @@ from gptopt.optim.attn_kq import *
 from gptopt.optim.attn_utils import *
 from gptopt.optim.fast_pdhg import *
 from gptopt.optim.fista import fista_ls_l1_reg
-from gptopt.optim.linop import *
+from gptopt.optim.linop import * 
+from gptopt.optim.least_squares_torchmin import *
+
+
+
+def cvxpy_A_linop_heads(Grad, A_linop, beta, n_head, mu=0, verbose=False):
+    """Solve 
+    minimize    <G, Z> + (mu/2)||Z||_F^2
+    subject to  ||A Z||_max <= beta
+    by CVXPY vectorizing linear operator A_linop
+    solving
+    minimize     g^Tz + (mu/2)||z||_2^2
+    subject to   ||A_vec z||_inf <= beta
+    """
+    m, n = linop_mn_from_shape(A_linop, n_head=n_head)
+
+    A_mat = kron_mat_A_linop_heads(A_linop.A1, A_linop.A2, n_head).cpu().numpy()
+    g = pack_Z(Grad, m, n, n_head=n_head)
+
+    z, x = cp.Variable(g.size), cp.Variable(A_mat.shape[0])
+    obj = cp.sum(g.T @ z)
+    if mu > 0:
+        obj += (mu / 2) * cp.sum_squares(z) 
+    objective = cp.Minimize(obj)
+    constraints = [ A_mat @ z == x, 
+                   cp.max(cp.abs(x)) <= beta]
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.CLARABEL, verbose=verbose)
+    assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
+
+    Z = unpack_Z(z.value, m, n, n_head=n_head)
+    Y = unpack_Y(constraints[0].dual_value, n, n_head=n_head) 
+    return Z, obj.value, Y
+
+
+def cvxpy_ls_l1_reg_heads(Grad, A_linop, beta, n_head, mu):
+    """Solve 
+    minimize    <G, Z> + (mu/2)||Z||_F^2
+    subject to  ||A Z||_max <= beta
+    by CVXPY vectorizing linear operator A_linop
+    solving
+    minimize     g^Tz + (mu/2)||z||_2^2
+    subject to   ||A_vec z||_inf <= beta
+    """
+    m, n = linop_mn_from_shape(A_linop, n_head=n_head)
+
+    A_mat = kron_mat_A_linop_heads(A_linop.A1, A_linop.A2, n_head).cpu().numpy()
+    g = pack_Z(Grad, m, n, n_head=n_head)
+
+    y = cp.Variable((n_head * n * n))
+    obj = (1/(2*mu)) * cp.sum_squares(A_mat.T @ y + g) + beta * cp.abs(y).sum()
+    objective = cp.Minimize(obj) 
+    prob = cp.Problem(objective, [])
+    prob.solve(solver=cp.CLARABEL)
+    assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
+
+    Y = unpack_Y(y.value, n, n_head=n_head)
+    return Y, -obj.value
 
 
 def cvxpy_ls_l1_reg(W_k, W_q, G_wk, G_wq, beta, mu):
@@ -45,6 +102,29 @@ def cvxpy_ls_l1_reg(W_k, W_q, G_wk, G_wq, beta, mu):
     assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
     return Y.value, -obj.value
 
+
+def cvxpy_lmax_smooth_heads(Grad, A_linop, beta, n_head, mu_moreau):
+    """Solve 
+    minimize    <G, Z> + (1/2*mu)||(AZ - beta)_+||_F^2
+    by CVXPY vectorizing linear operator A_linop
+    solving
+    minimize     g^Tz + (mu/2)||(A_vec z - beta)_+||_2^2
+    """
+    m, n = linop_mn_from_shape(A_linop, n_head=n_head)
+
+    A_mat = kron_mat_A_linop_heads(A_linop.A1, A_linop.A2, n_head).cpu().numpy()
+    g = pack_Z(Grad, m, n, n_head=n_head)
+
+    z = cp.Variable(2*n_head*m*n)
+    x = A_mat @ z
+    obj = cp.sum(g.T@z) \
+           + (1/(2*mu_moreau)) * cp.sum_squares(cp.pos(cp.abs(x) - beta))
+    objective = cp.Minimize(obj)  
+    prob = cp.Problem(objective, [])
+    prob.solve(solver=cp.CLARABEL)
+    assert prob.status in ["optimal", "optimal_inaccurate"], print(prob.status)
+    Z = unpack_Z(z.value, m, n, n_head=n_head)
+    return Z, obj.value
 
 def cvxpy_lmax_smooth(W_k, W_q, G_wk, G_wq, beta, mu_moreau):
     Z1, Z2 = cp.Variable(W_k.shape), cp.Variable(W_q.shape)
@@ -684,9 +764,11 @@ def gaussian_data(m, n, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=Fa
     return A, B, G1, G2, A_np, B_np, G1_np, G2_np, lamb_max
 
 
-def generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, eps=1e-12, device="cuda"):
+def generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, eps=1e-12, device="cuda",
+                                             dtype=torch.float32):
     # generate random matrix mxn with operator norm 1 and given rank 
-    A = einsum(torch.randn(n_head, m, rank, device=device), torch.randn(n_head, rank, n, device=device),
+    A = einsum(torch.randn(n_head, m, rank, device=device, dtype=dtype), 
+               torch.randn(n_head, rank, n, device=device, dtype=dtype),
                "h m r, h r n -> h m n") 
     r_A = (torch.abs(A).sum(axis=-1)**0.5)[:, :, None]               
     c_A = (torch.abs(A).sum(axis=-2)**0.5)[:, None, :]
@@ -696,28 +778,25 @@ def generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, eps=1e-12, devi
     return rearrange(res, "n_head n1 n2 -> (n_head n1) n2")  # (n_head*n, n)
 
 
-def gaussian_data_heads(m, n, n_head=1, std1=1, std2=1, G_in_range=False, rank_ratio=1, debug=False):
+def gaussian_data_heads(m, n, n_head=1, std1=1, std2=1, G_in_range=True, rank_ratio=1, 
+                        debug=False, dtype=torch.float32):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    A1 = torch.randn(n_head * m, n, device=device) * std1
-    A2 = torch.randn(n_head * m, n, device=device) * std1
+    A1 = torch.randn(n_head * m, n, device=device, dtype=dtype) * std1
+    A2 = torch.randn(n_head * m, n, device=device, dtype=dtype) * std1
     rank = int(min(m, n) * rank_ratio)
     if G_in_range: 
-        Y0 = generate_matrix_rank_normalized_op_torch(n, n, rank, n_head, device=device) * std2
+        Y0 = generate_matrix_rank_normalized_op_torch(n, n, rank, n_head, device=device,
+                                                      dtype=dtype) * std2
         Grad = matvec_attn_linop_adj_heads(A1=A1, A2=A2, n_head=n_head)(Y0)
-        G1, G2 = rearrange(Grad, "(n_head zs) n_att n_embd1 -> zs (n_head n_att) n_embd1",
-                 zs=2, n_head=n_head)
+        G1, G2 = rearrange(Grad, "(n_head zs n_att) n_embd1 -> zs (n_head n_att) n_embd1",
+                 zs=2, n_head=n_head) 
     else:
         rank = int(min(m, n) * rank_ratio)
-        G1 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device) * std2
-        G2 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device) * std2
+        G1 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device, dtype=dtype) * std2
+        G2 = generate_matrix_rank_normalized_op_torch(m, n, rank, n_head, device=device, dtype=dtype) * std2
         if debug:
             assert torch.norm(G1, ord=2) <= std2 + 1e-5 and \
                     torch.norm(G2, ord=2) <= std2 + 1e-5
-
-    A1_heads = rearrange(A1, "(n_head n_att) n_embd -> n_head n_att n_embd",
-                n_head=n_head)
-    A2_heads = rearrange(A2, "(n_head n_att) n_embd -> n_head n_att n_embd",
-                n_head=n_head) 
     
     return A2, A1, G1, G2
 
